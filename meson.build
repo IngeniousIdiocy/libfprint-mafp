@@ -137,7 +137,7 @@ default_drivers = [
 
     # SPI
     'elanspi',
-    'mafp',
+    'mafp8800',
 ]
 
 # FIXME: All the drivers should be fixed by adjusting the byte order.
@@ -186,7 +186,7 @@ driver_helper_mapping = {
     'aes4000' : [ 'aeslib', 'aes3k' ],
     'uru4000' : [ 'nss' ],
     'elanspi' : [ 'udev' ],
-    'mafp' : [ 'udev' ],
+    'mafp8800' : [ 'udev' ],
     'virtual_image'          : [ 'virtual' ],
     'virtual_device'         : [ 'virtual' ],
     'virtual_device_storage' : [ 'virtual' ],

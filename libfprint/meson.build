@@ -129,8 +129,8 @@ driver_sources = {
         [ 'drivers/elanmoc/elanmoc.c' ],
     'elanspi' :
         [ 'drivers/elanspi.c' ],
-    'mafp' :
-        [ 'drivers/mafp.c' ],
+    'mafp8800' :
+        [ 'drivers/mafp8800.c' ],
     'nb1010' :
         [ 'drivers/nb1010.c' ],
     'virtual_image' :

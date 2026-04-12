@@ -13,7 +13,7 @@
  * dispatches enroll/verify/identify requests via GCond signaling.
  */
 
-#define FP_COMPONENT "mafp"
+#define FP_COMPONENT "mafp8800"
 
 #include "drivers_api.h"
 
@@ -72,7 +72,7 @@
 
 /* ─── device struct ──────────────────────────────────────────────── */
 
-struct _FpiDeviceMafp
+struct _FpiDeviceMafp8800
 {
   FpDevice parent;
 
@@ -104,11 +104,11 @@ struct _FpiDeviceMafp
   gboolean    exit_flag;
   gboolean    has_work;
   gboolean    canceled;
-  void      (*run_func)(struct _FpiDeviceMafp *self);
+  void      (*run_func)(struct _FpiDeviceMafp8800 *self);
 };
 
-G_DECLARE_FINAL_TYPE (FpiDeviceMafp, fpi_device_mafp, FPI, DEVICE_MAFP, FpDevice)
-G_DEFINE_TYPE (FpiDeviceMafp, fpi_device_mafp, FP_TYPE_DEVICE)
+G_DECLARE_FINAL_TYPE (FpiDeviceMafp8800, fpi_device_mafp8800, FPI, DEVICE_MAFP8800, FpDevice)
+G_DEFINE_TYPE (FpiDeviceMafp8800, fpi_device_mafp8800, FP_TYPE_DEVICE)
 
 /* ─── SPI transport ──────────────────────────────────────────────── */
 
@@ -118,7 +118,7 @@ G_DEFINE_TYPE (FpiDeviceMafp, fpi_device_mafp, FP_TYPE_DEVICE)
  * Response byte: rx[2] (verified against community driver)
  */
 static gint
-mafp_set_reg (FpiDeviceMafp *self, guint8 reg, guint8 val)
+mafp_set_reg (FpiDeviceMafp8800 *self, guint8 reg, guint8 val)
 {
   guint8 tx[4] = { reg, val, 0x00, 0x00 };
   guint8 rx[4] = { 0 };
@@ -133,7 +133,7 @@ mafp_set_reg (FpiDeviceMafp *self, guint8 reg, guint8 val)
 }
 
 static gboolean
-mafp_spi_xfer (FpiDeviceMafp *self, guint8 *buf, gsize len)
+mafp_spi_xfer (FpiDeviceMafp8800 *self, guint8 *buf, gsize len)
 {
   struct spi_ioc_transfer tr = {
     .tx_buf = (unsigned long) buf, .rx_buf = (unsigned long) buf,
@@ -145,7 +145,7 @@ mafp_spi_xfer (FpiDeviceMafp *self, guint8 *buf, gsize len)
 /* SPI read: send first 2 bytes of buf, receive len bytes back.
  * Matches community mafp_sensor_spi_read_data semantics. */
 static gboolean
-mafp_spi_read_data (FpiDeviceMafp *self, guint8 *buf, gsize len)
+mafp_spi_read_data (FpiDeviceMafp8800 *self, guint8 *buf, gsize len)
 {
   /* The community driver does write(fd, buf, 2) then read(fd, spi_buf, len).
    * With direct ioctl, we do a single full-duplex transfer of the full length. */
@@ -155,7 +155,7 @@ mafp_spi_read_data (FpiDeviceMafp *self, guint8 *buf, gsize len)
 /* ─── FP36 chip protocol ─────────────────────────────────────────── */
 
 static gboolean
-mafp_fp36_reset (FpiDeviceMafp *self)
+mafp_fp36_reset (FpiDeviceMafp8800 *self)
 {
   mafp_set_reg (self, 0x8C, 0xFF);
   for (int i = 0; i < 20; i++)
@@ -169,7 +169,7 @@ mafp_fp36_reset (FpiDeviceMafp *self)
 }
 
 static void
-mafp_fp36_capture_mode (FpiDeviceMafp *self, guint8 gain, guint8 integration, guint8 dac)
+mafp_fp36_capture_mode (FpiDeviceMafp8800 *self, guint8 gain, guint8 integration, guint8 dac)
 {
   mafp_set_reg (self, 0x20, 0x8F);
   mafp_set_reg (self, 0x18, gain);
@@ -187,7 +187,7 @@ mafp_fp36_capture_mode (FpiDeviceMafp *self, guint8 gain, guint8 integration, gu
 }
 
 static int
-mafp_fp36_read_image (FpiDeviceMafp *self, guint8 *out_frame)
+mafp_fp36_read_image (FpiDeviceMafp8800 *self, guint8 *out_frame)
 {
   guint8 *buf = self->spi_buf;
   memset (buf, 0xFF, MAFP_RAW_READ_SZ);
@@ -231,7 +231,7 @@ mafp_fp36_read_image (FpiDeviceMafp *self, guint8 *out_frame)
 
 /* Capture one frame: reset → capture_mode → read_image */
 static int
-mafp_fp36_capture (FpiDeviceMafp *self, guint8 *frame)
+mafp_fp36_capture (FpiDeviceMafp8800 *self, guint8 *frame)
 {
   mafp_fp36_reset (self);
   mafp_fp36_capture_mode (self, self->calib[1], 0x02, 0xA1);
@@ -249,7 +249,7 @@ frame_pixel (const guint8 *frame, int row, int col)
 /* ─── detection mode setup ───────────────────────────────────────── */
 
 static void
-mafp_fp36_int_ctl_init (FpiDeviceMafp *self)
+mafp_fp36_int_ctl_init (FpiDeviceMafp8800 *self)
 {
   mafp_set_reg (self, 0x10, 0xBF);
   guint8 flush[0x26];
@@ -272,7 +272,7 @@ mafp_fp36_int_ctl_init (FpiDeviceMafp *self)
 }
 
 static void
-mafp_fp36_calc_grey (FpiDeviceMafp *self, guint8 int_val,
+mafp_fp36_calc_grey (FpiDeviceMafp8800 *self, guint8 int_val,
                      guint8 *g0, guint8 *g1, guint8 *g2)
 {
   mafp_set_reg (self, 0x18, int_val);
@@ -293,7 +293,7 @@ mafp_fp36_calc_grey (FpiDeviceMafp *self, guint8 int_val,
 }
 
 static void
-mafp_fp36_detect_mode (FpiDeviceMafp *self)
+mafp_fp36_detect_mode (FpiDeviceMafp8800 *self)
 {
   mafp_fp36_reset (self);
   mafp_set_reg (self, 0x10, 0xBF);
@@ -331,7 +331,7 @@ mafp_crc8 (const guint8 *data, gsize len)
 }
 
 static gboolean
-mafp_load_calib (FpiDeviceMafp *self)
+mafp_load_calib (FpiDeviceMafp8800 *self)
 {
   FILE *f = fopen (MAFP_CALIB_PATH, "rb");
   if (!f)
@@ -347,7 +347,7 @@ mafp_load_calib (FpiDeviceMafp *self)
 }
 
 static void
-mafp_save_calib (FpiDeviceMafp *self)
+mafp_save_calib (FpiDeviceMafp8800 *self)
 {
   self->calib[0] = MAFP_CALIB_MAGIC;
   guint8 crc = mafp_crc8 (self->calib, 0x2E4C);
@@ -365,7 +365,7 @@ mafp_save_calib (FpiDeviceMafp *self)
 }
 
 static void
-mafp_fp36_calibrate (FpiDeviceMafp *self)
+mafp_fp36_calibrate (FpiDeviceMafp8800 *self)
 {
   /* Try loading cached calibration */
   if (mafp_load_calib (self))
@@ -491,7 +491,7 @@ mafp_fp36_calibrate (FpiDeviceMafp *self)
 /* ─── finger detection (exact community algorithm) ───────────────── */
 
 static gboolean
-mafp_fp36_finger_is_detect (FpiDeviceMafp *self)
+mafp_fp36_finger_is_detect (FpiDeviceMafp8800 *self)
 {
   /* Capture frame */
   mafp_fp36_capture (self, self->cur_frame);
@@ -541,7 +541,7 @@ mafp_fp36_finger_is_detect (FpiDeviceMafp *self)
 }
 
 static gboolean
-mafp_fp36_finger_is_stable (FpiDeviceMafp *self)
+mafp_fp36_finger_is_stable (FpiDeviceMafp8800 *self)
 {
   long sad = 0;
   for (int row = 0; row < MAFP_ROWS; row++)
@@ -565,7 +565,7 @@ mafp_fp36_finger_is_stable (FpiDeviceMafp *self)
  * Finger darkens pixels, so bg > cur → positive result = ridge depth.
  */
 static void
-mafp_fp36_enhance (FpiDeviceMafp *self)
+mafp_fp36_enhance (FpiDeviceMafp8800 *self)
 {
   guint16 *out = self->enhanced;
   const guint8 *bg = self->bg_frame;       /* no-finger background */
@@ -660,7 +660,7 @@ mafp_enhanced_to_8bit (const guint16 *src, guint8 *dst)
 /* ─── check cancellation ─────────────────────────────────────────── */
 
 static gboolean
-mafp_is_canceled (FpiDeviceMafp *self)
+mafp_is_canceled (FpiDeviceMafp8800 *self)
 {
   return self->canceled || fpi_device_action_is_cancelled (FP_DEVICE (self));
 }
@@ -668,7 +668,7 @@ mafp_is_canceled (FpiDeviceMafp *self)
 /* ─── enroll (runs in worker thread) ─────────────────────────────── */
 
 static void
-mafp_enroll_run (FpiDeviceMafp *self)
+mafp_enroll_run (FpiDeviceMafp8800 *self)
 {
   fp_info ("enroll: starting");
 
@@ -780,7 +780,7 @@ canceled:
 /* ─── verify/identify (runs in worker thread) ────────────────────── */
 
 static void
-mafp_verify_run (FpiDeviceMafp *self)
+mafp_verify_run (FpiDeviceMafp8800 *self)
 {
   FpiDeviceAction action = fpi_device_get_current_action (FP_DEVICE (self));
 
@@ -906,7 +906,7 @@ canceled:
 static gpointer
 mafp_worker (gpointer data)
 {
-  FpiDeviceMafp *self = FPI_DEVICE_MAFP (data);
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (data);
 
   while (TRUE)
     {
@@ -919,7 +919,7 @@ mafp_worker (gpointer data)
 
       self->has_work = FALSE;
       self->canceled = FALSE;
-      void (*func)(FpiDeviceMafp *) = self->run_func;
+      void (*func)(FpiDeviceMafp8800 *) = self->run_func;
       g_mutex_unlock (&self->lock);
 
       if (func)
@@ -929,7 +929,7 @@ mafp_worker (gpointer data)
 }
 
 static void
-mafp_dispatch (FpiDeviceMafp *self, void (*func)(FpiDeviceMafp *))
+mafp_dispatch (FpiDeviceMafp8800 *self, void (*func)(FpiDeviceMafp8800 *))
 {
   g_mutex_lock (&self->lock);
   self->run_func = func;
@@ -944,7 +944,7 @@ mafp_dispatch (FpiDeviceMafp *self, void (*func)(FpiDeviceMafp *))
 static void
 mafp_open (FpDevice *dev)
 {
-  FpiDeviceMafp *self = FPI_DEVICE_MAFP (dev);
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (dev);
   const char *path = fpi_device_get_udev_data (dev, FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
 
   fp_info ("opening %s", path ? path : "(null)");
@@ -1012,7 +1012,7 @@ mafp_open (FpDevice *dev)
 static void
 mafp_close (FpDevice *dev)
 {
-  FpiDeviceMafp *self = FPI_DEVICE_MAFP (dev);
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (dev);
 
   if (self->worker)
     {
@@ -1039,13 +1039,13 @@ mafp_close (FpDevice *dev)
   fpi_device_close_complete (dev, NULL);
 }
 
-static void mafp_enroll (FpDevice *dev) { mafp_dispatch (FPI_DEVICE_MAFP (dev), mafp_enroll_run); }
-static void mafp_verify (FpDevice *dev) { mafp_dispatch (FPI_DEVICE_MAFP (dev), mafp_verify_run); }
+static void mafp_enroll (FpDevice *dev) { mafp_dispatch (FPI_DEVICE_MAFP8800 (dev), mafp_enroll_run); }
+static void mafp_verify (FpDevice *dev) { mafp_dispatch (FPI_DEVICE_MAFP8800 (dev), mafp_verify_run); }
 
 static void
 mafp_cancel (FpDevice *dev)
 {
-  FpiDeviceMafp *self = FPI_DEVICE_MAFP (dev);
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (dev);
   g_mutex_lock (&self->lock);
   self->canceled = TRUE;
   g_mutex_unlock (&self->lock);
@@ -1059,12 +1059,12 @@ static const FpIdEntry mafp_id_table[] = {
   { .udev_types = 0 }
 };
 
-static void fpi_device_mafp_init (FpiDeviceMafp *self) { self->spi_fd = -1; }
+static void fpi_device_mafp8800_init (FpiDeviceMafp8800 *self) { self->spi_fd = -1; }
 
 static void
-fpi_device_mafp_finalize (GObject *obj)
+fpi_device_mafp8800_finalize (GObject *obj)
 {
-  FpiDeviceMafp *self = FPI_DEVICE_MAFP (obj);
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (obj);
   g_clear_pointer (&self->bg_frame, g_free);
   g_clear_pointer (&self->cur_frame, g_free);
   g_clear_pointer (&self->stab_frame, g_free);
@@ -1072,15 +1072,15 @@ fpi_device_mafp_finalize (GObject *obj)
   g_clear_pointer (&self->enhanced, g_free);
   g_clear_pointer (&self->spi_buf, g_free);
   if (self->spi_fd >= 0) close (self->spi_fd);
-  G_OBJECT_CLASS (fpi_device_mafp_parent_class)->finalize (obj);
+  G_OBJECT_CLASS (fpi_device_mafp8800_parent_class)->finalize (obj);
 }
 
 static void
-fpi_device_mafp_class_init (FpiDeviceMafpClass *klass)
+fpi_device_mafp8800_class_init (FpiDeviceMafp8800Class *klass)
 {
   FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
 
-  dev_class->id               = "mafp";
+  dev_class->id               = "mafp8800";
   dev_class->full_name        = "Microarray MAFP Fingerprint Sensor";
   dev_class->type             = FP_DEVICE_TYPE_UDEV;
   dev_class->id_table         = mafp_id_table;
@@ -1094,7 +1094,7 @@ fpi_device_mafp_class_init (FpiDeviceMafpClass *klass)
   dev_class->identify = mafp_verify;
   dev_class->cancel   = mafp_cancel;
 
-  G_OBJECT_CLASS (klass)->finalize = fpi_device_mafp_finalize;
+  G_OBJECT_CLASS (klass)->finalize = fpi_device_mafp8800_finalize;
 
   fpi_device_class_auto_initialize_features (dev_class);
 }
