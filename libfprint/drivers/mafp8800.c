@@ -52,16 +52,31 @@
 /* Enrollment */
 #define MAFP_ENROLL_STAGES    8
 
-/* Matching: NCC threshold (0..1000) */
-/* Approximate pixels-per-mm (sensor ~4.6mm wide, 36 px) */
-#define MAFP_PPMM             8.0
+/* ─── Scale-space keypoint matching constants (from community binary) ── */
 
-/* NCC matching threshold and vertical shift range */
-#define MAFP_MATCH_THRESH     500
-#define MAFP_SHIFT_MAX        20
+/* Gaussian pyramid: 5 levels (original + 4 blurs), 4 DoG layers */
+#define MAFP_PYR_LEVELS       5
+#define MAFP_DOG_LEVELS       4
 
-/* Template: 8-bit enhanced pixels, MAFP_ENHANCED_PIXELS per sample */
-#define MAFP_TPL_SAMPLE_SZ    MAFP_ENHANCED_PIXELS
+/* Template geometry: 2 banks × 50 keypoints × 20 bytes + headers */
+#define MAFP_MAX_KP           50     /* max keypoints per bank */
+#define MAFP_NUM_BANKS        2
+#define MAFP_DESC_BYTES       16     /* 128-bit binary descriptor */
+#define MAFP_KP_META          4      /* row(u8) + col(u8) + orientation(u16) */
+#define MAFP_KP_SIZE          (MAFP_DESC_BYTES + MAFP_KP_META)  /* 20 */
+#define MAFP_BANK_DATA_SZ     (MAFP_MAX_KP * MAFP_KP_SIZE)  /* 1000 */
+#define MAFP_BANK_SZ          (4 + MAFP_BANK_DATA_SZ)  /* 1004 */
+#define MAFP_TPL_MAGIC        0xEF
+#define MAFP_TPL_SAMPLE_SZ    (4 + MAFP_NUM_BANKS * MAFP_BANK_SZ) /* 2012 */
+
+/* Match scoring (thresholds from community binary disassembly) */
+#define MAFP_MATCH_THRESH     3000   /* 0xBB8: score >= this = match */
+#define MAFP_MIN_MATCH_PTS    2      /* minimum correspondences */
+#define MAFP_HAMMING_THRESH   48     /* max Hamming distance for descriptor match */
+#define MAFP_INLIER_DIST_SQ   2303   /* 0x8FF: max squared distance for inlier */
+#define MAFP_MAX_KP_TOTAL     100    /* max keypoints across both DoG layers */
+
+/* Template buffer: header + 8 enrollment samples */
 #define MAFP_TPL_HDR_SZ       4
 #define MAFP_TPL_BUF_SZ       (MAFP_TPL_HDR_SZ + MAFP_ENROLL_STAGES * MAFP_TPL_SAMPLE_SZ)
 
@@ -602,59 +617,520 @@ mafp_fp36_enhance (FpiDeviceMafp8800 *self)
     }
 }
 
-/* ─── NCC matching with vertical translation search ──────────────── */
+/* ─── Scale-space keypoint matching ──────────────────────────────── */
 
-static double
-ncc_region (const guint8 *a, int a_off,
-            const guint8 *b, int b_off, int rows)
+/* Gaussian kernels (u16 fixed-point, sum≈65536) from community binary */
+static const guint16 kern7[]  = {291, 3539, 15862, 26152, 15862, 3539, 291};
+static const guint16 kern9[]  = {339, 1951, 6809, 14415, 18508, 14415, 6809, 1951, 339};
+static const guint16 kern13[] = {145, 575, 1771, 4248, 7937, 11549, 13086, 11549, 7937, 4248, 1771, 575, 145};
+static const guint16 kern17[] = {170, 433, 977, 1942, 3409, 5280, 7217, 8706, 9268, 8706, 7217, 5280, 3409, 1942, 977, 433, 170};
+
+/* 128 comparison pairs for binary descriptor (Gaussian σ=2, seed 42) */
+static const gint8 desc_pairs[128][4] = {
+  {+0,+0,+0,+1}, {+0,-2,+0,+0}, {+0,+0,+0,+2}, {+1,+0,-1,-2},
+  {+0,+2,+0,+0}, {+1,-2,+0,+0}, {+1,+0,+0,+0}, {+1,-2,+1,-3},
+  {-4,-1,-1,+1}, {+0,+0,+0,+1}, {-1,-1,+0,+0}, {+0,+4,-1,-2},
+  {+1,+2,+1,+1}, {+2,+0,-2,-1}, {+1,-2,+0,+0}, {+0,+1,+1,+4},
+  {+1,-1,-1,-1}, {+1,-1,+0,+1}, {-1,+0,-3,-2}, {-1,+0,+2,+0},
+  {+0,+0,+2,+1}, {+0,-2,+1,+0}, {+2,+0,+3,+0}, {+3,+0,-1,-2},
+  {+0,+2,+1,+1}, {-4,+1,+1,-1}, {-1,+0,+3,-2}, {+0,+2,+0,+0},
+  {+1,+0,+4,+0}, {+2,-2,+0,+0}, {+3,-3,+1,+1}, {+3,+1,+0,-1},
+  {-2,+0,+0,+4}, {-1,+0,-3,+0}, {+0,+1,+2,+0}, {-2,+0,+1,+0},
+  {-1,+2,+0,+1}, {+2,+1,+0,+4}, {+0,+0,+0,+2}, {+0,+1,+2,-1},
+  {-3,+0,+0,-1}, {+1,+1,-1,+1}, {+0,-2,+0,+0}, {-1,+1,+0,-1},
+  {+0,+2,-1,+0}, {+0,+4,-3,+1}, {+0,+0,+3,+0}, {+4,+0,+0,+0},
+  {-1,+0,+0,+0}, {-4,+4,+0,+3}, {-2,+0,+4,-1}, {-2,-1,+0,+1},
+  {+2,+0,-3,+0}, {+2,+0,-3,+0}, {+2,+4,+1,+0}, {-2,-1,+0,+1},
+  {+1,+0,-2,-1}, {-2,+1,-4,+0}, {+0,+3,+0,+2}, {+0,-1,-1,+3},
+  {+1,+0,+4,+0}, {+1,+0,+0,+4}, {+3,-2,+0,+0}, {+1,-2,-4,-3},
+  {+0,+0,+0,-1}, {-2,-4,+0,+0}, {+1,+1,+0,+2}, {+0,-1,-1,-1},
+  {-4,+0,+0,+0}, {-1,+0,+3,+0}, {-1,-1,+0,-2}, {+0,+0,+3,+1},
+  {+2,-1,+1,-2}, {+0,+0,-1,+3}, {+1,-3,+1,+0}, {+0,+0,+0,-4},
+  {-2,+1,+2,+3}, {+3,-4,+1,-3}, {+3,+0,-2,+4}, {+1,-3,+0,-1},
+  {+0,+0,+2,-2}, {+0,+3,-1,+0}, {+0,-1,+1,+0}, {-1,+3,+1,+0},
+  {-1,-1,+2,+0}, {+0,+0,+1,+0}, {+1,+0,+1,+1}, {+0,-1,-1,-1},
+  {-1,+1,+0,+3}, {+4,+0,-3,+0}, {+0,-2,+0,+0}, {+0,-1,-1,+3},
+  {+0,-1,+0,+1}, {-1,+0,+1,+1}, {+0,+2,+1,+0}, {-2,+1,-1,-1},
+  {-1,+0,-4,+0}, {+0,-1,+2,+1}, {-1,-1,+1,-3}, {+0,-1,+0,+0},
+  {+0,+2,+0,+0}, {-2,+1,+1,+2}, {-1,+0,+0,+0}, {+0,-3,+1,+1},
+  {+2,+4,+0,+0}, {+0,+3,-3,+0}, {-2,-4,-4,-2}, {+2,-1,+0,-2},
+  {+1,-2,+2,-1}, {-1,+0,+0,+2}, {+0,-2,-1,-1}, {+1,+0,+0,+1},
+  {-1,+0,+0,+3}, {+0,+0,-2,+1}, {-1,+0,-3,+2}, {-2,-1,+2,-2},
+  {+0,+0,-1,+2}, {+2,-3,-2,+1}, {-2,+0,+0,+1}, {+0,+0,-1,+2},
+  {+0,+0,-1,+0}, {+0,+0,-2,+1}, {+2,+0,+1,+1}, {+1,+0,+0,+1},
+  {+0,-1,+0,-3}, {+0,+0,+2,+0}, {+1,+0,-2,-2}, {-1,-2,+1,+0}
+};
+
+/* Scoring weights from community binary (.rodata 0x407e0) */
+static const gint32 score_weights[9] = {
+  188145, 17081, -315, -9497, 13444, -66, -9704, -228, 3707
+};
+#define SCORE_BIAS  711041
+#define SCORE_CLAMP 524288
+
+/* Internal keypoint representation (not serialized) */
+typedef struct {
+  guint8  row;
+  guint8  col;
+  guint8  dog_layer;
+  gint16  response;
+  gdouble orientation;
+  guint8  desc[MAFP_DESC_BYTES];
+} MafpKeypoint;
+
+/* Correspondence for geometric verification */
+typedef struct {
+  guint8 pr, pc, gr, gc;
+} MafpCorr;
+
+/* ── Gaussian blur (separable, fixed-point u16) ── */
+
+static void
+mafp_blur_h (const guint16 *src, guint16 *dst,
+             const guint16 *kern, int ksize, int rows, int cols)
 {
-  int n = rows * MAFP_ENHANCED_COLS;
-  const guint8 *ap = a + a_off * MAFP_ENHANCED_COLS;
-  const guint8 *bp = b + b_off * MAFP_ENHANCED_COLS;
+  int half = ksize / 2;
 
-  gint64 sum_a = 0, sum_b = 0;
-  for (int i = 0; i < n; i++)
-    { sum_a += ap[i]; sum_b += bp[i]; }
-  gint32 mean_a = (gint32)(sum_a / n);
-  gint32 mean_b = (gint32)(sum_b / n);
+  for (int r = 0; r < rows; r++)
+    for (int c = 0; c < cols; c++)
+      {
+        guint32 sum = 0;
+        for (int k = -half; k <= half; k++)
+          {
+            int cc = CLAMP (c + k, 0, cols - 1);
+            sum += (guint32) src[r * cols + cc] * kern[k + half];
+          }
+        dst[r * cols + c] = (guint16) (sum >> 16);
+      }
+}
 
-  gint64 sum_ab = 0, sum_aa = 0, sum_bb = 0;
-  for (int i = 0; i < n; i++)
+static void
+mafp_blur_v (const guint16 *src, guint16 *dst,
+             const guint16 *kern, int ksize, int rows, int cols)
+{
+  int half = ksize / 2;
+
+  for (int r = 0; r < rows; r++)
+    for (int c = 0; c < cols; c++)
+      {
+        guint32 sum = 0;
+        for (int k = -half; k <= half; k++)
+          {
+            int rr = CLAMP (r + k, 0, rows - 1);
+            sum += (guint32) src[rr * cols + c] * kern[k + half];
+          }
+        dst[r * cols + c] = (guint16) (sum >> 16);
+      }
+}
+
+static void
+mafp_gauss_blur (const guint16 *src, guint16 *dst, guint16 *tmp,
+                 const guint16 *kern, int ksize, int rows, int cols)
+{
+  mafp_blur_h (src, tmp, kern, ksize, rows, cols);
+  mafp_blur_v (tmp, dst, kern, ksize, rows, cols);
+}
+
+/* ── DoG keypoint detection ── */
+
+static int
+mafp_detect_keypoints (gint16 **dog, MafpKeypoint *kps)
+{
+  int W = MAFP_ENHANCED_COLS;
+  int count = 0;
+
+  for (int layer = 1; layer <= 2; layer++)
+    for (int r = 1; r < MAFP_ROWS - 1; r++)
+      for (int c = 1; c < W - 1; c++)
+        {
+          gint16 val = dog[layer][r * W + c];
+          if (val <= 0)
+            continue;
+
+          gboolean is_max = TRUE;
+          for (int dl = -1; dl <= 1 && is_max; dl++)
+            for (int dr = -1; dr <= 1 && is_max; dr++)
+              for (int dc = -1; dc <= 1 && is_max; dc++)
+                {
+                  if (dl == 0 && dr == 0 && dc == 0)
+                    continue;
+                  if (dog[layer + dl][(r + dr) * W + (c + dc)] >= val)
+                    is_max = FALSE;
+                }
+
+          if (is_max && count < MAFP_MAX_KP_TOTAL)
+            {
+              kps[count].row       = (guint8) r;
+              kps[count].col       = (guint8) c;
+              kps[count].dog_layer = (guint8) layer;
+              kps[count].response  = val;
+              count++;
+            }
+        }
+
+  /* If we hit the cap, keep strongest by sorting on response */
+  if (count >= MAFP_MAX_KP_TOTAL)
     {
-      gint32 da = (gint32) ap[i] - mean_a;
-      gint32 db = (gint32) bp[i] - mean_b;
-      sum_ab += da * db;
-      sum_aa += da * da;
-      sum_bb += db * db;
+      for (int i = 0; i < count - 1; i++)
+        for (int j = i + 1; j < count; j++)
+          if (kps[j].response > kps[i].response)
+            { MafpKeypoint tmp = kps[i]; kps[i] = kps[j]; kps[j] = tmp; }
+      count = MAFP_MAX_KP_TOTAL;
     }
-  if (sum_aa == 0 || sum_bb == 0)
-    return 0.0;
-  return (double) sum_ab / sqrt ((double) sum_aa * (double) sum_bb);
+
+  return count;
+}
+
+/* ── Orientation assignment (36-bin histogram, [0.25,0.5,0.25] smoothing) ── */
+
+static void
+mafp_assign_orientations (guint16 **pyr, MafpKeypoint *kps, int count)
+{
+  int W = MAFP_ENHANCED_COLS;
+
+  for (int ki = 0; ki < count; ki++)
+    {
+      int r0 = kps[ki].row, c0 = kps[ki].col;
+      const guint16 *img = pyr[kps[ki].dog_layer];
+      gdouble hist[36] = {0};
+      int radius = 4;
+      gdouble sigma = radius * 0.5;
+
+      for (int dr = -radius; dr <= radius; dr++)
+        {
+          int r = r0 + dr;
+          if (r < 1 || r >= MAFP_ROWS - 1)
+            continue;
+          for (int dc = -radius; dc <= radius; dc++)
+            {
+              int c = c0 + dc;
+              if (c < 1 || c >= W - 1)
+                continue;
+              gdouble gx = (gdouble) img[r * W + c + 1] - (gdouble) img[r * W + c - 1];
+              gdouble gy = (gdouble) img[(r + 1) * W + c] - (gdouble) img[(r - 1) * W + c];
+              gdouble mag = sqrt (gx * gx + gy * gy);
+              gdouble angle = atan2 (gy, gx);
+              if (angle < 0)
+                angle += 2.0 * G_PI;
+              gdouble w = exp (-(dr * dr + dc * dc) / (2.0 * sigma * sigma));
+              int bin = (int) (angle / (2.0 * G_PI) * 36.0);
+              if (bin >= 36)
+                bin = 35;
+              hist[bin] += mag * w;
+            }
+        }
+
+      /* Smooth with [0.25, 0.5, 0.25], 2 passes */
+      for (int pass = 0; pass < 2; pass++)
+        {
+          gdouble tmp[36];
+          for (int b = 0; b < 36; b++)
+            tmp[b] = hist[(b + 35) % 36] * 0.25
+                   + hist[b] * 0.5
+                   + hist[(b + 1) % 36] * 0.25;
+          memcpy (hist, tmp, sizeof (hist));
+        }
+
+      int best_bin = 0;
+      gdouble best_val = hist[0];
+      for (int b = 1; b < 36; b++)
+        if (hist[b] > best_val)
+          { best_val = hist[b]; best_bin = b; }
+
+      if (best_val < 48.0)
+        {
+          kps[ki].orientation = -1.0;
+          continue;
+        }
+
+      /* Sub-bin parabolic interpolation */
+      gdouble lv = hist[(best_bin + 35) % 36];
+      gdouble rv = hist[(best_bin + 1) % 36];
+      gdouble offset = 0;
+      gdouble denom = lv + rv - 2.0 * best_val;
+      if (fabs (denom) > 1e-6)
+        offset = 0.5 * (lv - rv) / denom;
+      kps[ki].orientation = ((best_bin + offset + 0.5) / 36.0) * 2.0 * G_PI;
+    }
+}
+
+/* ── Binary descriptor computation ── */
+
+static void
+mafp_compute_descriptor (const guint16 *img, int rows, int cols,
+                         int r0, int c0, gdouble angle, guint8 *desc)
+{
+  gdouble ca = cos (angle), sa = sin (angle);
+
+  memset (desc, 0, MAFP_DESC_BYTES);
+  for (int i = 0; i < 128; i++)
+    {
+      gint8 dy1 = desc_pairs[i][0], dx1 = desc_pairs[i][1];
+      gint8 dy2 = desc_pairs[i][2], dx2 = desc_pairs[i][3];
+
+      int ry1 = CLAMP (r0 + (int) (dy1 * ca - dx1 * sa + 0.5), 0, rows - 1);
+      int rx1 = CLAMP (c0 + (int) (dy1 * sa + dx1 * ca + 0.5), 0, cols - 1);
+      int ry2 = CLAMP (r0 + (int) (dy2 * ca - dx2 * sa + 0.5), 0, rows - 1);
+      int rx2 = CLAMP (c0 + (int) (dy2 * sa + dx2 * ca + 0.5), 0, cols - 1);
+
+      if (img[ry1 * cols + rx1] > img[ry2 * cols + rx2])
+        desc[i / 8] |= (guint8) (1 << (i % 8));
+    }
+}
+
+/* ── Feature extraction: enhanced u16 image → 2012-byte template ── */
+
+static int
+mafp_extract_features (const guint16 *enhanced, guint8 *tpl)
+{
+  int R = MAFP_ROWS, C = MAFP_ENHANCED_COLS, N = MAFP_ENHANCED_PIXELS;
+
+  /* Allocate pyramid and DoG on heap */
+  guint16 *pyr[MAFP_PYR_LEVELS];
+  gint16  *dog[MAFP_DOG_LEVELS];
+  guint16 *tmp = g_new (guint16, N);
+  for (int l = 0; l < MAFP_PYR_LEVELS; l++)
+    pyr[l] = g_new (guint16, N);
+  for (int l = 0; l < MAFP_DOG_LEVELS; l++)
+    dog[l] = g_new (gint16, N);
+
+  /* Build pyramid */
+  memcpy (pyr[0], enhanced, N * sizeof (guint16));
+  mafp_gauss_blur (pyr[0], pyr[1], tmp, kern7,  7,  R, C);
+  mafp_gauss_blur (pyr[1], pyr[2], tmp, kern9,  9,  R, C);
+  mafp_gauss_blur (pyr[2], pyr[3], tmp, kern13, 13, R, C);
+  mafp_gauss_blur (pyr[3], pyr[4], tmp, kern17, 17, R, C);
+  g_free (tmp);
+
+  /* DoG = adjacent level difference */
+  for (int l = 0; l < MAFP_DOG_LEVELS; l++)
+    for (int i = 0; i < N; i++)
+      dog[l][i] = (gint16) pyr[l][i] - (gint16) pyr[l + 1][i];
+
+  /* Detect keypoints */
+  MafpKeypoint kps[MAFP_MAX_KP_TOTAL];
+  int n_kps = mafp_detect_keypoints (dog, kps);
+
+  /* Assign orientations */
+  mafp_assign_orientations (pyr, kps, n_kps);
+
+  /* Compute descriptors */
+  for (int i = 0; i < n_kps; i++)
+    {
+      if (kps[i].orientation < 0)
+        continue;
+      mafp_compute_descriptor (pyr[kps[i].dog_layer], R, C,
+                               kps[i].row, kps[i].col,
+                               kps[i].orientation, kps[i].desc);
+    }
+
+  /* Serialize: [4-byte magic/pad] [bank0: 4+1000] [bank1: 4+1000] */
+  memset (tpl, 0, MAFP_TPL_SAMPLE_SZ);
+  tpl[0] = MAFP_TPL_MAGIC;
+
+  for (int bank = 0; bank < MAFP_NUM_BANKS; bank++)
+    {
+      int target_layer = bank + 1;
+      gint32 bcount = 0;
+      guint8 *bdata = tpl + 4 + bank * MAFP_BANK_SZ;
+      guint8 *kpdata = bdata + 4;
+
+      for (int i = 0; i < n_kps && bcount < MAFP_MAX_KP; i++)
+        {
+          if (kps[i].dog_layer != target_layer || kps[i].orientation < 0)
+            continue;
+          guint8 *p = kpdata + bcount * MAFP_KP_SIZE;
+          memcpy (p, kps[i].desc, MAFP_DESC_BYTES);
+          p[16] = kps[i].row;
+          p[17] = kps[i].col;
+          guint16 ori16 = (guint16) (kps[i].orientation / (2.0 * G_PI) * 65536.0);
+          memcpy (p + 18, &ori16, 2);
+          bcount++;
+        }
+      memcpy (bdata, &bcount, sizeof (gint32));
+    }
+
+  /* Cleanup */
+  for (int l = 0; l < MAFP_PYR_LEVELS; l++)
+    g_free (pyr[l]);
+  for (int l = 0; l < MAFP_DOG_LEVELS; l++)
+    g_free (dog[l]);
+
+  gint32 b0, b1;
+  memcpy (&b0, tpl + 4, 4);
+  memcpy (&b1, tpl + 4 + MAFP_BANK_SZ, 4);
+  fp_info ("extract: %d keypoints (%d + %d)", b0 + b1, b0, b1);
+  return b0 + b1;
+}
+
+/* ── Hamming distance between two 128-bit descriptors ── */
+
+static inline int
+mafp_hamming (const guint8 *a, const guint8 *b)
+{
+  const guint64 *a64 = (const guint64 *) a;
+  const guint64 *b64 = (const guint64 *) b;
+  return __builtin_popcountll (a64[0] ^ b64[0])
+       + __builtin_popcountll (a64[1] ^ b64[1]);
+}
+
+/* ── Geometric verification ── */
+
+static gboolean
+mafp_solve_similarity (const MafpCorr *c,
+                       gdouble *a, gdouble *b, gdouble *tx, gdouble *ty)
+{
+  gdouble px1 = c[0].pc, py1 = c[0].pr;
+  gdouble gx1 = c[0].gc, gy1 = c[0].gr;
+  gdouble px2 = c[1].pc, py2 = c[1].pr;
+  gdouble gx2 = c[1].gc, gy2 = c[1].gr;
+
+  gdouble dxp = px2 - px1, dyp = py2 - py1;
+  gdouble dxg = gx2 - gx1, dyg = gy2 - gy1;
+  gdouble den = dxp * dxp + dyp * dyp;
+  if (den < 1.0)
+    return FALSE;
+
+  *a  = (dxp * dxg + dyp * dyg) / den;
+  *b  = (dxp * dyg - dyp * dxg) / den;
+  *tx = gx1 - (*a * px1 - *b * py1);
+  *ty = gy1 - (*b * px1 + *a * py1);
+  return fabs (*a) <= 4.0 && fabs (*b) <= 4.0;
 }
 
 static int
-mafp_match_score (const guint8 *a, const guint8 *b)
+mafp_count_inliers (const MafpCorr *corrs, int n,
+                    gdouble a, gdouble b, gdouble tx, gdouble ty,
+                    gint64 *total_dist)
 {
-  double best = -1.0;
-  int overlap = MAFP_ROWS - MAFP_SHIFT_MAX;
-
-  for (int shift = -MAFP_SHIFT_MAX; shift <= MAFP_SHIFT_MAX; shift++)
+  int inliers = 0;
+  *total_dist = 0;
+  for (int i = 0; i < n; i++)
     {
-      int a_off = (shift >= 0) ? shift : 0;
-      int b_off = (shift >= 0) ? 0 : -shift;
-      double s = ncc_region (a, a_off, b, b_off, overlap);
-      if (s > best)
-        best = s;
+      gdouble ex = a * corrs[i].pc - b * corrs[i].pr + tx - corrs[i].gc;
+      gdouble ey = b * corrs[i].pc + a * corrs[i].pr + ty - corrs[i].gr;
+      gint64 dsq = (gint64) (ex * ex + ey * ey);
+      if (dsq <= MAFP_INLIER_DIST_SQ)
+        { inliers++; *total_dist += dsq; }
     }
-  return (int) (best * 1000.0);
+  return inliers;
 }
 
-/* Convert enhanced 16-bit to 8-bit */
-static void
-mafp_enhanced_to_8bit (const guint16 *src, guint8 *dst)
+/* ── Scoring (weighted linear combination + sigmoid) ── */
+
+static int
+mafp_sigmoid (gint64 raw)
 {
-  for (int i = 0; i < MAFP_ENHANCED_PIXELS; i++)
-    dst[i] = (guint8) (src[i] >> 8);
+  if (raw > SCORE_CLAMP)
+    raw = SCORE_CLAMP;
+  if (raw < -SCORE_CLAMP)
+    raw = -SCORE_CLAMP;
+  gdouble x = (gdouble) raw / (gdouble) SCORE_CLAMP;
+  return (int) (10000.0 / (1.0 + exp (-6.0 * x)));
+}
+
+static int
+mafp_compute_match_score (int n_inliers, int n_corrs, gint64 total_dist,
+                          int n_probe, int n_gallery)
+{
+  if (n_corrs < MAFP_MIN_MATCH_PTS)
+    return 0;
+
+  gint64 f[9];
+  f[0] = n_inliers;
+  f[1] = n_corrs;
+  f[2] = n_inliers > 0 ? total_dist / n_inliers : 0;
+  f[3] = n_corrs > 0 ? (n_inliers * 1000) / n_corrs : 0;
+  f[4] = n_probe;
+  f[5] = n_gallery;
+  f[6] = MIN (n_probe, n_gallery) > 0
+       ? (n_corrs * 1000) / MIN (n_probe, n_gallery) : 0;
+  f[7] = total_dist;
+  f[8] = (gint64) n_inliers * n_inliers;
+
+  gint64 score = 0;
+  for (int i = 0; i < 9; i++)
+    score += f[i] * score_weights[i];
+  score -= SCORE_BIAS;
+
+  return mafp_sigmoid (score);
+}
+
+/* ── Top-level template matching ── */
+
+static int
+mafp_match_templates (const guint8 *probe, const guint8 *gallery)
+{
+  MafpCorr corrs[200];
+  int n_corrs = 0, n_kp_p = 0, n_kp_g = 0;
+
+  for (int bank = 0; bank < MAFP_NUM_BANKS; bank++)
+    {
+      const guint8 *pb = probe   + 4 + bank * MAFP_BANK_SZ;
+      const guint8 *gb = gallery + 4 + bank * MAFP_BANK_SZ;
+
+      gint32 np, ng;
+      memcpy (&np, pb, 4);  np = MIN (np, MAFP_MAX_KP);
+      memcpy (&ng, gb, 4);  ng = MIN (ng, MAFP_MAX_KP);
+      n_kp_p += np;  n_kp_g += ng;
+
+      const guint8 *pk = pb + 4, *gk = gb + 4;
+
+      for (int pi = 0; pi < np; pi++)
+        {
+          const guint8 *pd = pk + pi * MAFP_KP_SIZE;
+          int best = 999, second = 999, best_gi = -1;
+
+          for (int gi = 0; gi < ng; gi++)
+            {
+              int d = mafp_hamming (pd, gk + gi * MAFP_KP_SIZE);
+              if (d < best)
+                { second = best; best = d; best_gi = gi; }
+              else if (d < second)
+                second = d;
+            }
+
+          if (best_gi >= 0 && best < MAFP_HAMMING_THRESH &&
+              (second >= 999 || best * 10 < second * 8) &&
+              n_corrs < 200)
+            {
+              corrs[n_corrs].pr = pd[16];
+              corrs[n_corrs].pc = pd[17];
+              corrs[n_corrs].gr = gk[best_gi * MAFP_KP_SIZE + 16];
+              corrs[n_corrs].gc = gk[best_gi * MAFP_KP_SIZE + 17];
+              n_corrs++;
+            }
+        }
+    }
+
+  fp_dbg ("match: %d correspondences (%d probe kps, %d gallery kps)",
+          n_corrs, n_kp_p, n_kp_g);
+
+  if (n_corrs < MAFP_MIN_MATCH_PTS)
+    return 0;
+
+  /* Exhaustive pairwise geometric verification */
+  int best_inliers = 0;
+  gint64 best_dist = 0x7FFFFFFFFFFFFFFFLL;
+
+  for (int i = 0; i < n_corrs; i++)
+    for (int j = i + 1; j < n_corrs; j++)
+      {
+        MafpCorr pair[2] = { corrs[i], corrs[j] };
+        gdouble a, b, tx, ty;
+        if (!mafp_solve_similarity (pair, &a, &b, &tx, &ty))
+          continue;
+        gint64 td = 0;
+        int inl = mafp_count_inliers (corrs, n_corrs, a, b, tx, ty, &td);
+        if (inl > best_inliers || (inl == best_inliers && td < best_dist))
+          { best_inliers = inl; best_dist = td; }
+      }
+
+  int score = mafp_compute_match_score (best_inliers, n_corrs, best_dist,
+                                         n_kp_p, n_kp_g);
+  fp_info ("match: inliers=%d score=%d (thresh=%d)", best_inliers, score,
+           MAFP_MATCH_THRESH);
+  return score;
 }
 
 /* ─── check cancellation ─────────────────────────────────────────── */
@@ -680,7 +1156,6 @@ mafp_enroll_run (FpiDeviceMafp8800 *self)
 
   /* Allocate template buffer */
   g_autofree guint8 *tpl_buf = g_malloc0 (MAFP_TPL_BUF_SZ);
-  g_autofree guint8 *norm8 = g_malloc0 (MAFP_ENHANCED_PIXELS);
   int tpl_count = 0;
 
   for (int stage = 0; stage < MAFP_ENROLL_STAGES; stage++)
@@ -731,11 +1206,10 @@ mafp_enroll_run (FpiDeviceMafp8800 *self)
 
       fp_info ("enroll: stable, capturing template");
 
-      /* Enhance image and store as 8-bit template */
+      /* Enhance image and extract keypoint features */
       mafp_fp36_enhance (self);
-      mafp_enhanced_to_8bit (self->enhanced, norm8);
-      memcpy (tpl_buf + MAFP_TPL_HDR_SZ + tpl_count * MAFP_TPL_SAMPLE_SZ,
-              norm8, MAFP_TPL_SAMPLE_SZ);
+      mafp_extract_features (self->enhanced,
+                             tpl_buf + MAFP_TPL_HDR_SZ + tpl_count * MAFP_TPL_SAMPLE_SZ);
       tpl_count++;
 
       fpi_device_enroll_progress (FP_DEVICE (self), stage, NULL, NULL);
@@ -815,10 +1289,10 @@ mafp_verify_run (FpiDeviceMafp8800 *self)
       memcpy (self->stab_frame, self->cur_frame, MAFP_FRAME_BYTES);
     }
 
-  /* Enhance and convert to 8-bit */
+  /* Enhance and extract features */
   mafp_fp36_enhance (self);
-  g_autofree guint8 *norm8 = g_malloc0 (MAFP_ENHANCED_PIXELS);
-  mafp_enhanced_to_8bit (self->enhanced, norm8);
+  guint8 probe_tpl[MAFP_TPL_SAMPLE_SZ];
+  mafp_extract_features (self->enhanced, probe_tpl);
 
   if (action == FPI_DEVICE_ACTION_VERIFY)
     {
@@ -840,7 +1314,7 @@ mafp_verify_run (FpiDeviceMafp8800 *self)
               for (int i = 0; i < count && i < MAFP_ENROLL_STAGES; i++)
                 {
                   const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
-                  int score = mafp_match_score (norm8, sample);
+                  int score = mafp_match_templates (probe_tpl, sample);
                   fp_info ("verify: template %d score=%d (thresh=%d)",
                            i, score, MAFP_MATCH_THRESH);
                   if (score >= MAFP_MATCH_THRESH)
@@ -876,7 +1350,7 @@ mafp_verify_run (FpiDeviceMafp8800 *self)
           for (int i = 0; i < count && i < MAFP_ENROLL_STAGES; i++)
             {
               const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
-              if (mafp_match_score (norm8, sample) >= MAFP_MATCH_THRESH)
+              if (mafp_match_templates (probe_tpl, sample) >= MAFP_MATCH_THRESH)
                 { matched_print = p; goto id_done; }
             }
         }
