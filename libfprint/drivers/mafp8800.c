@@ -655,7 +655,8 @@ typedef struct {
   guint8  row;
   guint8  col;
   guint8  dog_layer;
-  gint16  response;
+  guint8  polarity;    /* 0 = DoG maximum, 1 = DoG minimum */
+  gint16  response;    /* absolute value of DoG extremum */
   gdouble orientation;
   guint8  desc[MAFP_DESC_BYTES];
 } MafpKeypoint;
@@ -729,26 +730,28 @@ mafp_detect_keypoints (gint16 **dog, MafpKeypoint *kps)
       for (int c = margin_c; c < W - margin_c; c++)
         {
           gint16 val = dog[layer][r * W + c];
-          if (val <= 0)
+          if (val == 0)
             continue;
 
-          gboolean is_max = TRUE;
-          for (int dl = -1; dl <= 1 && is_max; dl++)
-            for (int dr = -1; dr <= 1 && is_max; dr++)
-              for (int dc = -1; dc <= 1 && is_max; dc++)
+          gboolean is_max = (val > 0), is_min = (val < 0);
+          for (int dl = -1; dl <= 1 && (is_max || is_min); dl++)
+            for (int dr = -1; dr <= 1 && (is_max || is_min); dr++)
+              for (int dc = -1; dc <= 1 && (is_max || is_min); dc++)
                 {
                   if (dl == 0 && dr == 0 && dc == 0)
                     continue;
-                  if (dog[layer + dl][(r + dr) * W + (c + dc)] >= val)
-                    is_max = FALSE;
+                  gint16 nb = dog[layer + dl][(r + dr) * W + (c + dc)];
+                  if (nb >= val) is_max = FALSE;
+                  if (nb <= val) is_min = FALSE;
                 }
 
-          if (is_max && count < MAFP_MAX_KP_TOTAL)
+          if ((is_max || is_min) && count < MAFP_MAX_KP_TOTAL)
             {
               kps[count].row       = (guint8) r;
               kps[count].col       = (guint8) c;
               kps[count].dog_layer = (guint8) layer;
-              kps[count].response  = val;
+              kps[count].polarity  = is_min ? 1 : 0;
+              kps[count].response  = is_min ? -val : val;
               count++;
             }
         }
@@ -855,7 +858,7 @@ mafp_compute_descriptor (const gint32 *grad_mag, const guint16 *grad_ori,
   gdouble angle = (gdouble) kp_ori / 65536.0 * 2.0 * G_PI;
   gdouble ca = cos (angle), sa = sin (angle);
   gint32 hist[128] = {0};
-  gdouble sigma = 8.0;
+  gdouble sigma = 10.0;
 
   /* Phase 1: 17×17 grid, 2-pixel spacing, rotated by orientation */
   for (int gr = -8; gr <= 8; gr++)
@@ -877,8 +880,8 @@ mafp_compute_descriptor (const gint32 *grad_mag, const guint16 *grad_ori,
         gint32 weight = (gint32) (mag * gauss);
 
         /* Trilinear interpolation into 4×4×8 histogram (matching binary) */
-        gdouble sx_f = (rx + 16.0) / 8.0;
-        gdouble sy_f = (ry + 16.0) / 8.0;
+        gdouble sx_f = (rx + 7.5) / 5.0;
+        gdouble sy_f = (ry + 7.5) / 5.0;
         guint16 rel = gori - kp_ori;
         gdouble o_f = (gdouble) rel / 8192.0;
 
@@ -1001,7 +1004,7 @@ mafp_extract_features (const guint16 *enhanced, guint8 *tpl)
   /* Compute gradient magnitude and orientation from original image */
   gint32  *grad_mag = g_new0 (gint32, N);
   guint16 *grad_ori = g_new0 (guint16, N);
-  mafp_compute_gradients (pyr[0], R, C, grad_mag, grad_ori);
+  mafp_compute_gradients (pyr[1], R, C, grad_mag, grad_ori);
 
   /* Compute SIFT-WHT descriptors from gradient fields */
   for (int i = 0; i < n_kps; i++)
@@ -1022,14 +1025,14 @@ mafp_extract_features (const guint16 *enhanced, guint8 *tpl)
 
   for (int bank = 0; bank < MAFP_NUM_BANKS; bank++)
     {
-      int target_layer = bank + 1;
+      int target_polarity = bank;  /* bank 0 = maxima, bank 1 = minima */
       gint32 bcount = 0;
       guint8 *bdata = tpl + 4 + bank * MAFP_BANK_SZ;
       guint8 *kpdata = bdata + 4;
 
       for (int i = 0; i < n_kps && bcount < MAFP_MAX_KP; i++)
         {
-          if (kps[i].dog_layer != target_layer || kps[i].orientation < 0)
+          if (kps[i].polarity != target_polarity || kps[i].orientation < 0)
             continue;
           guint8 *p = kpdata + bcount * MAFP_KP_SIZE;
           memcpy (p, kps[i].desc, MAFP_DESC_BYTES);
