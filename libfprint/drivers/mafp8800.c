@@ -41,20 +41,20 @@
 #include <linux/spi/spidev.h>
 
 /* Image geometry: 160 rows x 37 pixels, 74 bytes/row (2 hdr + 72 pixel) */
-#define MAFP_ROWS             160
-#define MAFP_COLS             37
-#define MAFP_ROW_BYTES        74       /* 0x4A */
-#define MAFP_PIXELS           (MAFP_ROWS * MAFP_COLS)  /* 5920 */
-#define MAFP_FRAME_BYTES      (320 * MAFP_ROW_BYTES)   /* 0x5C80 = 23680 */
-#define MAFP_ENHANCED_COLS    36       /* column 0 stripped */
-#define MAFP_ENHANCED_PIXELS  (MAFP_ROWS * MAFP_ENHANCED_COLS)  /* 5760 */
+#define MAFP_ROWS 160
+#define MAFP_COLS 37
+#define MAFP_ROW_BYTES 74              /* 0x4A */
+#define MAFP_PIXELS (MAFP_ROWS * MAFP_COLS)            /* 5920 */
+#define MAFP_FRAME_BYTES (320 * MAFP_ROW_BYTES)        /* 0x5C80 = 23680 */
+#define MAFP_ENHANCED_COLS 36          /* column 0 stripped */
+#define MAFP_ENHANCED_PIXELS (MAFP_ROWS * MAFP_ENHANCED_COLS)   /* 5760 */
 
 /* SPI */
-#define MAFP_SPI_SPEED        4000000
-#define MAFP_RAW_READ_SZ      20480    /* 0x5000 */
+#define MAFP_SPI_SPEED 4000000
+#define MAFP_RAW_READ_SZ 20480         /* 0x5000 */
 
 /* Chip ID */
-#define MAFP_CHIPID_FP36      0x24
+#define MAFP_CHIPID_FP36 0x24
 
 /* Detection thresholds */
 #define MAFP_DETECT_PX_THRESH 320      /* 0x140: per-pixel delta for "changed" */
@@ -62,52 +62,52 @@
 #define MAFP_STABLE_SAD_LIMIT 114687   /* 0x1C1FF: sum-of-abs-diffs for "stable" */
 
 /* Enrollment */
-#define MAFP_ENROLL_STAGES    8
+#define MAFP_ENROLL_STAGES 8
 
 /* Gaussian pyramid: 5 levels (original + 4 blurs), 4 DoG layers */
-#define MAFP_PYR_LEVELS       5
-#define MAFP_DOG_LEVELS       4
+#define MAFP_PYR_LEVELS 5
+#define MAFP_DOG_LEVELS 4
 
 /* Template geometry: 2 banks × 50 keypoints × 20 bytes + headers */
-#define MAFP_MAX_KP           50     /* max keypoints per bank */
-#define MAFP_NUM_BANKS        2
-#define MAFP_DESC_BYTES       16     /* 128-bit binary descriptor */
-#define MAFP_KP_META          4      /* row(u8) + col(u8) + orientation(u16) */
-#define MAFP_KP_SIZE          (MAFP_DESC_BYTES + MAFP_KP_META)  /* 20 */
-#define MAFP_BANK_DATA_SZ     (MAFP_MAX_KP * MAFP_KP_SIZE)  /* 1000 */
-#define MAFP_BANK_SZ          (4 + MAFP_BANK_DATA_SZ)  /* 1004 */
-#define MAFP_TPL_MAGIC        0xEF
-#define MAFP_TPL_SAMPLE_SZ    (4 + MAFP_NUM_BANKS * MAFP_BANK_SZ) /* 2012 */
+#define MAFP_MAX_KP 50               /* max keypoints per bank */
+#define MAFP_NUM_BANKS 2
+#define MAFP_DESC_BYTES 16           /* 128-bit binary descriptor */
+#define MAFP_KP_META 4               /* row(u8) + col(u8) + orientation(u16) */
+#define MAFP_KP_SIZE (MAFP_DESC_BYTES + MAFP_KP_META)           /* 20 */
+#define MAFP_BANK_DATA_SZ (MAFP_MAX_KP * MAFP_KP_SIZE)      /* 1000 */
+#define MAFP_BANK_SZ (4 + MAFP_BANK_DATA_SZ)           /* 1004 */
+#define MAFP_TPL_MAGIC 0xEF
+#define MAFP_TPL_SAMPLE_SZ (4 + MAFP_NUM_BANKS * MAFP_BANK_SZ)    /* 2012 */
 
 /* Match scoring */
-#define MAFP_MATCH_THRESH     3000   /* 0xBB8: score >= this = match */
-#define MAFP_MIN_MATCH_PTS    6      /* raised from binary's 4: our simplified scoring
+#define MAFP_MATCH_THRESH 3000       /* 0xBB8: score >= this = match */
+#define MAFP_MIN_MATCH_PTS 6         /* raised from binary's 4: our simplified scoring
                                       * lacks the 9-feature sigmoid that rejects
                                       * low-quality 4-5 inlier matches */
-#define MAFP_HAMMING_THRESH   48     /* max Hamming distance for descriptor match */
-#define MAFP_HAMMING_RATIO    219    /* ratio test: best*256 < second*219 (≈0.855) */
-#define MAFP_INLIER_DIST_SQ   9.0   /* 2303/256: binary uses Q8, we use pixel coords */
-#define MAFP_MAX_INLIERS      10    /* binary hard-caps inliers at 10 */
-#define MAFP_MAX_MATCHES      15    /* binary caps matches per section at 15 */
-#define MAFP_MAX_KP_TOTAL     100   /* max keypoints across both DoG layers */
+#define MAFP_HAMMING_THRESH 48       /* max Hamming distance for descriptor match */
+#define MAFP_HAMMING_RATIO 219       /* ratio test: best*256 < second*219 (≈0.855) */
+#define MAFP_INLIER_DIST_SQ 9.0     /* 2303/256: binary uses Q8, we use pixel coords */
+#define MAFP_MAX_INLIERS 10         /* binary hard-caps inliers at 10 */
+#define MAFP_MAX_MATCHES 15         /* binary caps matches per section at 15 */
+#define MAFP_MAX_KP_TOTAL 100       /* max keypoints across both DoG layers */
 
 /* Template buffer: header + 8 enrollment samples */
-#define MAFP_TPL_HDR_SZ       4
-#define MAFP_TPL_BUF_SZ       (MAFP_TPL_HDR_SZ + MAFP_ENROLL_STAGES * MAFP_TPL_SAMPLE_SZ)
+#define MAFP_TPL_HDR_SZ 4
+#define MAFP_TPL_BUF_SZ (MAFP_TPL_HDR_SZ + MAFP_ENROLL_STAGES * MAFP_TPL_SAMPLE_SZ)
 
 /* Calibration file */
-#define MAFP_CALIB_PATH       "/var/lib/fprint/mafp_calibration"
-#define MAFP_CALIB_SZ         0x2E50   /* 11856 bytes */
-#define MAFP_CALIB_MAGIC      0x24
+#define MAFP_CALIB_PATH "/var/lib/fprint/mafp_calibration"
+#define MAFP_CALIB_SZ 0x2E50           /* 11856 bytes */
+#define MAFP_CALIB_MAGIC 0x24
 
 struct _FpiDeviceMafp8800
 {
   FpDevice parent;
 
-  int spi_fd;
+  int      spi_fd;
 
   /* calibration data (loaded from file or computed) */
-  guint8  calib[MAFP_CALIB_SZ];
+  guint8 calib[MAFP_CALIB_SZ];
 
   /* image buffers (each MAFP_FRAME_BYTES = 23680 bytes of u16 in LE) */
   guint8 *bg_frame;          /* background/image_data reference */
@@ -126,13 +126,13 @@ struct _FpiDeviceMafp8800
   gint32   gray_value;       /* saved detection score */
 
   /* worker thread */
-  GThread    *worker;
-  GMutex      lock;
-  GCond       cond;
-  gboolean    exit_flag;
-  gboolean    has_work;
-  gboolean    canceled;
-  void      (*run_func)(struct _FpiDeviceMafp8800 *self);
+  GThread *worker;
+  GMutex   lock;
+  GCond    cond;
+  gboolean exit_flag;
+  gboolean has_work;
+  gboolean canceled;
+  void     (*run_func)(struct _FpiDeviceMafp8800 *self);
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceMafp8800, fpi_device_mafp8800, FPI, DEVICE_MAFP8800, FpDevice)
@@ -162,6 +162,7 @@ mafp_spi_xfer (FpiDeviceMafp8800 *self, guint8 *buf, gsize len)
     .tx_buf = (unsigned long) buf, .rx_buf = (unsigned long) buf,
     .len = (guint32) len, .speed_hz = MAFP_SPI_SPEED, .bits_per_word = 8,
   };
+
   return ioctl (self->spi_fd, SPI_IOC_MESSAGE (1), &tr) >= 0;
 }
 
@@ -177,6 +178,7 @@ static void
 mafp_fp36_flush (FpiDeviceMafp8800 *self)
 {
   guint8 buf[0x26] = {0};
+
   buf[0] = 0x78;
   mafp_spi_read_data (self, buf, sizeof (buf));
 }
@@ -213,6 +215,7 @@ static int
 mafp_fp36_read_image (FpiDeviceMafp8800 *self, guint8 *out_frame)
 {
   guint8 *buf = self->spi_buf;
+
   memset (buf, 0xFF, MAFP_RAW_READ_SZ);
   buf[0] = 0x70;
 
@@ -265,6 +268,7 @@ static inline guint16
 frame_pixel (const guint8 *frame, int row, int col)
 {
   int off = row * MAFP_ROW_BYTES + col * 2;
+
   return (guint16) frame[off] | ((guint16) frame[off + 1] << 8);
 }
 
@@ -338,6 +342,7 @@ static guint8
 mafp_crc8 (const guint8 *data, gsize len)
 {
   guint8 crc = 0;
+
   for (gsize i = 0; i < len; i++)
     crc ^= data[i];
   return crc;
@@ -347,6 +352,7 @@ static gboolean
 mafp_load_calib (FpiDeviceMafp8800 *self)
 {
   FILE *f = fopen (MAFP_CALIB_PATH, "rb");
+
   if (!f)
     return FALSE;
   gsize n = fread (self->calib, 1, MAFP_CALIB_SZ, f);
@@ -383,10 +389,10 @@ mafp_fp36_calibrate (FpiDeviceMafp8800 *self)
   if (mafp_load_calib (self))
     {
       fp_dbg ("loaded cached calibration (gain=%d, detect_int=%d, thresh=%d/%d/%d)",
-               self->calib[1], self->calib[2],
-               self->calib[4], self->calib[5], self->calib[6]);
+              self->calib[1], self->calib[2],
+              self->calib[4], self->calib[5], self->calib[6]);
       memcpy (self->bg_frame, self->calib + 8,
-              MIN ((gsize)(MAFP_CALIB_SZ - 8), (gsize) MAFP_FRAME_BYTES));
+              MIN ((gsize) (MAFP_CALIB_SZ - 8), (gsize) MAFP_FRAME_BYTES));
       return;
     }
 
@@ -411,8 +417,8 @@ mafp_fp36_calibrate (FpiDeviceMafp8800 *self)
       int i = 0;
       while (i < 0x400 - 4 && nrows < 8)
         {
-          if (raw[i] == 0x00 && raw[i+1] == 0x00 &&
-              raw[i+2] == 0x0A && (raw[i+3] & 0xF0) == 0x50)
+          if (raw[i] == 0x00 && raw[i + 1] == 0x00 &&
+              raw[i + 2] == 0x0A && (raw[i + 3] & 0xF0) == 0x50)
             {
               int src = i + 4;
               if (src + MAFP_ROW_BYTES > 0x400)
@@ -422,7 +428,9 @@ mafp_fp36_calibrate (FpiDeviceMafp8800 *self)
               i = src + MAFP_ROW_BYTES;
             }
           else
-            i++;
+            {
+              i++;
+            }
         }
       for (int j = 0; j < 0x250; j += 2)
         total += ((guint16) raw[j] << 8) | raw[j + 1];
@@ -441,12 +449,16 @@ mafp_fp36_calibrate (FpiDeviceMafp8800 *self)
   /* Capture background image with found gain */
   mafp_fp36_capture (self, self->bg_frame);
   memcpy (self->calib + 8, self->bg_frame,
-          MIN ((gsize)(MAFP_CALIB_SZ - 8), (gsize) MAFP_FRAME_BYTES));
+          MIN ((gsize) (MAFP_CALIB_SZ - 8), (gsize) MAFP_FRAME_BYTES));
 
   /* 3-pass threshold search: coarse (step 16), fine (step 4), finest (step 1) */
   guint8 g0, g1, g2;
   guint8 final_int = 0;
-  static const struct { int start_off; int end_off; int step; int back; } passes[] = {
+  static const struct { int start_off;
+                        int end_off;
+                        int step;
+                        int back;
+  } passes[] = {
     { 0, 256, 16, 15 }, { 0, 16, 4, 0 }, { -3, 1, 1, 0 }
   };
 
@@ -454,14 +466,18 @@ mafp_fp36_calibrate (FpiDeviceMafp8800 *self)
     {
       int lo = (p == 0) ? passes[p].start_off : final_int + passes[p].start_off;
       int hi = (p == 0) ? passes[p].end_off : final_int + passes[p].end_off;
-      if (lo < 0) lo = 0;
+      if (lo < 0)
+        lo = 0;
       for (int v = lo; v < hi; v += passes[p].step)
         {
           mafp_fp36_reset (self);
           mafp_fp36_int_ctl_init (self);
           mafp_fp36_calc_grey (self, (guint8) v, &g0, &g1, &g2);
           if (g0 > 100 && g1 > 100 && g2 > 100)
-            { final_int = (guint8)(v > passes[p].back ? v - passes[p].back : 0); break; }
+            {
+              final_int = (guint8) (v > passes[p].back ? v - passes[p].back : 0);
+              break;
+            }
         }
     }
 
@@ -472,7 +488,7 @@ mafp_fp36_calibrate (FpiDeviceMafp8800 *self)
   self->calib[6] = g2 > 20 ? g2 - 20 : 0;
 
   fp_dbg ("calibration: detect_int=%d thresh=%d/%d/%d",
-           self->calib[2], self->calib[4], self->calib[5], self->calib[6]);
+          self->calib[2], self->calib[4], self->calib[5], self->calib[6]);
 
   mafp_save_calib (self);
 }
@@ -527,13 +543,15 @@ static gboolean
 mafp_fp36_finger_is_stable (FpiDeviceMafp8800 *self)
 {
   long sad = 0;
+
   for (int row = 0; row < MAFP_ROWS; row++)
     for (int col = 1; col < MAFP_COLS; col++)
       {
         gint32 a = (gint32) frame_pixel (self->cur_frame, row, col);
         gint32 b = (gint32) frame_pixel (self->stab_frame, row, col);
         gint32 d = b - a;
-        if (d < 0) d = -d;
+        if (d < 0)
+          d = -d;
         sad += d;
       }
   return sad <= MAFP_STABLE_SAD_LIMIT;
@@ -555,11 +573,13 @@ mafp_fp36_enhance (FpiDeviceMafp8800 *self)
       {
         guint16 bg_val = frame_pixel (bg, row, col);
         guint16 fg_val = frame_pixel (finger, row, col);
-        guint16 val = (guint16)((bg_val + 10000 - fg_val) & 0xFFFF);
+        guint16 val = (guint16) ((bg_val + 10000 - fg_val) & 0xFFFF);
         int idx = row * MAFP_ENHANCED_COLS + (col - 1);
         out[idx] = val;
-        if (val < px_min) px_min = val;
-        if (val > px_max) px_max = val;
+        if (val < px_min)
+          px_min = val;
+        if (val > px_max)
+          px_max = val;
       }
 
   guint16 range = px_max - px_min;
@@ -605,7 +625,8 @@ mafp_compute_gradients (const guint16 *img, int rows, int cols,
 }
 
 /* Internal keypoint representation */
-typedef struct {
+typedef struct
+{
   guint8  row;
   guint8  col;
   guint8  dog_layer;
@@ -616,7 +637,8 @@ typedef struct {
 } MafpKeypoint;
 
 /* Correspondence for RANSAC geometric verification */
-typedef struct {
+typedef struct
+{
   guint8  pr, pc, gr, gc;
   guint16 p_ori, g_ori;   /* keypoint orientations for angular consistency */
 } MafpCorr;
@@ -680,6 +702,7 @@ mafp_detect_keypoints (gint16 **dog, MafpKeypoint *kps)
   /* Exclude keypoints near edges: the 17×17 descriptor grid needs
    * ±16 pixels of margin. On a 36-wide image, that means col 5-30. */
   int margin_r = 8, margin_c = 5;
+
   for (int layer = 1; layer <= 2; layer++)
     for (int r = margin_r; r < MAFP_ROWS - margin_r; r++)
       for (int c = margin_c; c < W - margin_c; c++)
@@ -696,8 +719,10 @@ mafp_detect_keypoints (gint16 **dog, MafpKeypoint *kps)
                   if (dl == 0 && dr == 0 && dc == 0)
                     continue;
                   gint16 nb = dog[layer + dl][(r + dr) * W + (c + dc)];
-                  if (nb >= val) is_max = FALSE;
-                  if (nb <= val) is_min = FALSE;
+                  if (nb >= val)
+                    is_max = FALSE;
+                  if (nb <= val)
+                    is_min = FALSE;
                 }
 
           if ((is_max || is_min) && count < MAFP_MAX_KP_TOTAL)
@@ -717,7 +742,11 @@ mafp_detect_keypoints (gint16 **dog, MafpKeypoint *kps)
       for (int i = 0; i < count - 1; i++)
         for (int j = i + 1; j < count; j++)
           if (kps[j].response > kps[i].response)
-            { MafpKeypoint tmp = kps[i]; kps[i] = kps[j]; kps[j] = tmp; }
+            {
+              MafpKeypoint tmp = kps[i];
+              kps[i] = kps[j];
+              kps[j] = tmp;
+            }
       count = MAFP_MAX_KP_TOTAL;
     }
 
@@ -769,8 +798,8 @@ mafp_assign_orientations (guint16 **pyr, MafpKeypoint *kps, int count)
           gdouble tmp[36];
           for (int b = 0; b < 36; b++)
             tmp[b] = hist[(b + 35) % 36] * 0.25
-                   + hist[b] * 0.5
-                   + hist[(b + 1) % 36] * 0.25;
+                     + hist[b] * 0.5
+                     + hist[(b + 1) % 36] * 0.25;
           memcpy (hist, tmp, sizeof (hist));
         }
 
@@ -778,7 +807,10 @@ mafp_assign_orientations (guint16 **pyr, MafpKeypoint *kps, int count)
       gdouble best_val = hist[0];
       for (int b = 1; b < 36; b++)
         if (hist[b] > best_val)
-          { best_val = hist[b]; best_bin = b; }
+          {
+            best_val = hist[b];
+            best_bin = b;
+          }
 
       if (best_val < 48.0)
         {
@@ -877,7 +909,10 @@ mafp_compute_descriptor (const gint32 *grad_mag, const guint16 *grad_ori,
       gint32 *p = &wht[sp * 4];
       gint32 a = p[0] + p[1], b = p[0] - p[1];
       gint32 c = p[2] + p[3], d = p[2] - p[3];
-      p[0] = a + c;  p[1] = a - c;  p[2] = b - d;  p[3] = b + d;
+      p[0] = a + c;
+      p[1] = a - c;
+      p[2] = b - d;
+      p[3] = b + d;
     }
 
   /* Phase 2d-g: 16-point spatial WHT (4 butterfly levels) */
@@ -904,7 +939,10 @@ mafp_compute_descriptor (const gint32 *grad_mag, const guint16 *grad_ori,
       gint32 key = sorted[i];
       int j = i - 1;
       while (j >= 0 && sorted[j] > key)
-        { sorted[j + 1] = sorted[j]; j--; }
+        {
+          sorted[j + 1] = sorted[j];
+          j--;
+        }
       sorted[j + 1] = key;
     }
   gint32 median = sorted[64];
@@ -923,8 +961,9 @@ mafp_extract_features (const guint16 *enhanced, guint8 *tpl)
 
   /* Allocate pyramid and DoG on heap */
   guint16 *pyr[MAFP_PYR_LEVELS];
-  gint16  *dog[MAFP_DOG_LEVELS];
+  gint16 *dog[MAFP_DOG_LEVELS];
   guint16 *tmp = g_new (guint16, N);
+
   for (int l = 0; l < MAFP_PYR_LEVELS; l++)
     pyr[l] = g_new (guint16, N);
   for (int l = 0; l < MAFP_DOG_LEVELS; l++)
@@ -951,7 +990,7 @@ mafp_extract_features (const guint16 *enhanced, guint8 *tpl)
   mafp_assign_orientations (pyr, kps, n_kps);
 
   /* Compute gradient magnitude and orientation from original image */
-  gint32  *grad_mag = g_new0 (gint32, N);
+  gint32 *grad_mag = g_new0 (gint32, N);
   guint16 *grad_ori = g_new0 (guint16, N);
   mafp_compute_gradients (pyr[1], R, C, grad_mag, grad_ori);
 
@@ -1014,8 +1053,9 @@ mafp_hamming (const guint8 *a, const guint8 *b)
 {
   const guint64 *a64 = (const guint64 *) a;
   const guint64 *b64 = (const guint64 *) b;
+
   return __builtin_popcountll (a64[0] ^ b64[0])
-       + __builtin_popcountll (a64[1] ^ b64[1]);
+         + __builtin_popcountll (a64[1] ^ b64[1]);
 }
 
 static gboolean
@@ -1030,6 +1070,7 @@ mafp_solve_similarity (const MafpCorr *c,
   gdouble dxp = px2 - px1, dyp = py2 - py1;
   gdouble dxg = gx2 - gx1, dyg = gy2 - gy1;
   gdouble den = dxp * dxp + dyp * dyp;
+
   if (den < 1.0)
     return FALSE;
 
@@ -1090,8 +1131,10 @@ mafp_match_templates (const guint8 *probe, const guint8 *gallery)
       int bank_matches = 0;
 
       gint32 np, ng;
-      memcpy (&np, pb, 4);  np = MIN (np, MAFP_MAX_KP);
-      memcpy (&ng, gb, 4);  ng = MIN (ng, MAFP_MAX_KP);
+      memcpy (&np, pb, 4);
+      np = MIN (np, MAFP_MAX_KP);
+      memcpy (&ng, gb, 4);
+      ng = MIN (ng, MAFP_MAX_KP);
 
       const guint8 *pk = pb + 4, *gk = gb + 4;
 
@@ -1104,9 +1147,15 @@ mafp_match_templates (const guint8 *probe, const guint8 *gallery)
             {
               int d = mafp_hamming (pd, gk + gi * MAFP_KP_SIZE);
               if (d < best)
-                { second = best; best = d; best_gi = gi; }
+                {
+                  second = best;
+                  best = d;
+                  best_gi = gi;
+                }
               else if (d < second)
-                second = d;
+                {
+                  second = d;
+                }
             }
 
           /* Ratio test */
@@ -1139,7 +1188,10 @@ mafp_match_templates (const guint8 *probe, const guint8 *gallery)
         gboolean dup = FALSE;
         for (int j = 0; j < deduped; j++)
           if (corrs[j].gr == corrs[i].gr && corrs[j].gc == corrs[i].gc)
-            { dup = TRUE; break; }
+            {
+              dup = TRUE;
+              break;
+            }
         if (!dup)
           corrs[deduped++] = corrs[i];
       }
@@ -1160,8 +1212,9 @@ mafp_match_templates (const guint8 *probe, const guint8 *gallery)
         /* Angular consistency: both correspondences must agree on rotation */
         guint16 dp = corrs[i].p_ori - corrs[j].p_ori;
         guint16 dg = corrs[i].g_ori - corrs[j].g_ori;
-        gint16  adiff = (gint16) (dp - dg);
-        if (adiff < 0) adiff = -adiff;
+        gint16 adiff = (gint16) (dp - dg);
+        if (adiff < 0)
+          adiff = -adiff;
         if (adiff > 1822)  /* ~10 degrees */
           continue;
 
@@ -1174,10 +1227,14 @@ mafp_match_templates (const guint8 *probe, const guint8 *gallery)
         gdouble avg_d = 0;
         MafpCorr inliers_buf[MAFP_MAX_INLIERS];
         int inl = mafp_count_inliers (corrs, n_corrs, a, b, tx, ty,
-                                       inliers_buf, &avg_d);
+                                      inliers_buf, &avg_d);
 
         if (inl >= MAFP_MAX_INLIERS)
-          { best_inliers = inl; best_avg_dist = avg_d; goto done; }
+          {
+            best_inliers = inl;
+            best_avg_dist = avg_d;
+            goto done;
+          }
 
         if (inl >= MAFP_MIN_MATCH_PTS)
           {
@@ -1190,23 +1247,29 @@ mafp_match_templates (const guint8 *probe, const guint8 *gallery)
                   {
                     gdouble ravg = 0;
                     int rinl = mafp_count_inliers (corrs, n_corrs,
-                                                    ra, rb, rtx, rty,
-                                                    NULL, &ravg);
+                                                   ra, rb, rtx, rty,
+                                                   NULL, &ravg);
                     if (rinl > inl || (rinl == inl && ravg < avg_d))
-                      { inl = rinl; avg_d = ravg; }
+                      {
+                        inl = rinl;
+                        avg_d = ravg;
+                      }
                   }
               }
 
             if (inl > best_inliers ||
                 (inl == best_inliers && avg_d < best_avg_dist))
-              { best_inliers = inl; best_avg_dist = avg_d; }
+              {
+                best_inliers = inl;
+                best_avg_dist = avg_d;
+              }
           }
       }
 
 done:;
   int score = mafp_compute_match_score (best_inliers);
   fp_dbg ("match: inliers=%d avg_dist=%.1f score=%d (thresh=%d)",
-           best_inliers, best_avg_dist, score, MAFP_MATCH_THRESH);
+          best_inliers, best_avg_dist, score, MAFP_MATCH_THRESH);
   return score;
 }
 
@@ -1264,7 +1327,10 @@ mafp_enroll_run (FpiDeviceMafp8800 *self)
           if (!mafp_fp36_finger_is_detect (self))
             break;
           if (mafp_fp36_finger_is_stable (self))
-            { stable = TRUE; break; }
+            {
+              stable = TRUE;
+              break;
+            }
           memcpy (self->stab_frame, self->cur_frame, MAFP_FRAME_BYTES);
         }
 
@@ -1272,7 +1338,7 @@ mafp_enroll_run (FpiDeviceMafp8800 *self)
         {
           fp_dbg ("enroll: not stable, retrying stage %d", stage + 1);
           fpi_device_enroll_progress (FP_DEVICE (self), stage, NULL,
-            fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+                                      fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
           stage--;
           continue;
         }
@@ -1304,7 +1370,7 @@ mafp_enroll_run (FpiDeviceMafp8800 *self)
   FpPrint *print = NULL;
   fpi_device_get_enroll_data (FP_DEVICE (self), &print);
   GVariant *data = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
-                                               tpl_buf, MAFP_TPL_BUF_SZ, 1);
+                                              tpl_buf, MAFP_TPL_BUF_SZ, 1);
   fpi_print_set_type (print, FPI_PRINT_RAW);
   fpi_print_set_device_stored (print, FALSE);
   g_object_set (print, "fpi-data", data, NULL);
@@ -1316,7 +1382,7 @@ mafp_enroll_run (FpiDeviceMafp8800 *self)
 canceled:
   fp_dbg ("enroll: canceled");
   fpi_device_enroll_complete (FP_DEVICE (self), NULL,
-    fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
+                              fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
 }
 
 static void
@@ -1365,7 +1431,7 @@ mafp_verify_run (FpiDeviceMafp8800 *self)
       FpPrint *enrolled = NULL;
       fpi_device_get_verify_data (FP_DEVICE (self), &enrolled);
 
-      g_autoptr (GVariant) var = NULL;
+      g_autoptr(GVariant) var = NULL;
       g_object_get (enrolled, "fpi-data", &var, NULL);
 
       gboolean matched = FALSE;
@@ -1382,16 +1448,19 @@ mafp_verify_run (FpiDeviceMafp8800 *self)
                   const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
                   int score = mafp_match_templates (probe_tpl, sample);
                   fp_dbg ("verify: template %d score=%d (thresh=%d)",
-                           i, score, MAFP_MATCH_THRESH);
+                          i, score, MAFP_MATCH_THRESH);
                   if (score >= MAFP_MATCH_THRESH)
-                    { matched = TRUE; break; }
+                    {
+                      matched = TRUE;
+                      break;
+                    }
                 }
             }
         }
 
       fpi_device_verify_report (FP_DEVICE (self),
-                                 matched ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
-                                 NULL, NULL);
+                                matched ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
+                                NULL, NULL);
       fpi_device_verify_complete (FP_DEVICE (self), NULL);
     }
   else /* IDENTIFY */
@@ -1403,13 +1472,15 @@ mafp_verify_run (FpiDeviceMafp8800 *self)
       for (guint gi = 0; gi < gallery->len; gi++)
         {
           FpPrint *p = g_ptr_array_index (gallery, gi);
-          g_autoptr (GVariant) var = NULL;
+          g_autoptr(GVariant) var = NULL;
           g_object_get (p, "fpi-data", &var, NULL);
-          if (!var) continue;
+          if (!var)
+            continue;
 
           gsize tpl_sz = 0;
           const guint8 *tpl = g_variant_get_fixed_array (var, &tpl_sz, 1);
-          if (tpl_sz < MAFP_TPL_HDR_SZ) continue;
+          if (tpl_sz < MAFP_TPL_HDR_SZ)
+            continue;
 
           gint32 count = 0;
           memcpy (&count, tpl, sizeof (gint32));
@@ -1417,7 +1488,10 @@ mafp_verify_run (FpiDeviceMafp8800 *self)
             {
               const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
               if (mafp_match_templates (probe_tpl, sample) >= MAFP_MATCH_THRESH)
-                { matched_print = p; goto id_done; }
+                {
+                  matched_print = p;
+                  goto id_done;
+                }
             }
         }
 id_done:
@@ -1430,13 +1504,13 @@ canceled:
   if (action == FPI_DEVICE_ACTION_VERIFY)
     {
       fpi_device_verify_report (FP_DEVICE (self), FPI_MATCH_ERROR, NULL,
-        fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
+                                fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
       fpi_device_verify_complete (FP_DEVICE (self), NULL);
     }
   else
     {
       fpi_device_identify_report (FP_DEVICE (self), NULL, NULL,
-        fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
+                                  fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
       fpi_device_identify_complete (FP_DEVICE (self), NULL);
     }
 }
@@ -1455,7 +1529,10 @@ mafp_worker (gpointer data)
         g_cond_wait (&self->cond, &self->lock);
 
       if (self->exit_flag)
-        { g_mutex_unlock (&self->lock); break; }
+        {
+          g_mutex_unlock (&self->lock);
+          break;
+        }
 
       self->has_work = FALSE;
       self->canceled = FALSE;
@@ -1492,7 +1569,7 @@ mafp_open (FpDevice *dev)
   if (!path)
     {
       fpi_device_open_complete (dev,
-        fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "no spidev path"));
+                                fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "no spidev path"));
       return;
     }
 
@@ -1500,8 +1577,8 @@ mafp_open (FpDevice *dev)
   if (self->spi_fd < 0)
     {
       fpi_device_open_complete (dev,
-        fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
-                                  "open %s: %s", path, g_strerror (errno)));
+                                fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                          "open %s: %s", path, g_strerror (errno)));
       return;
     }
 
@@ -1515,9 +1592,10 @@ mafp_open (FpDevice *dev)
   /* Verify chip */
   if (!mafp_fp36_reset (self))
     {
-      close (self->spi_fd); self->spi_fd = -1;
+      close (self->spi_fd);
+      self->spi_fd = -1;
       fpi_device_open_complete (dev,
-        fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "chip not responding"));
+                                fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "chip not responding"));
       return;
     }
 
@@ -1525,10 +1603,11 @@ mafp_open (FpDevice *dev)
   fp_info ("chip ID=0x%02x", id);
   if (id != MAFP_CHIPID_FP36)
     {
-      close (self->spi_fd); self->spi_fd = -1;
+      close (self->spi_fd);
+      self->spi_fd = -1;
       fpi_device_open_complete (dev,
-        fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
-                                  "unsupported chip 0x%02x", id));
+                                fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
+                                                          "unsupported chip 0x%02x", id));
       return;
     }
 
@@ -1574,18 +1653,30 @@ mafp_close (FpDevice *dev)
   g_clear_pointer (&self->spi_buf, g_free);
 
   if (self->spi_fd >= 0)
-    { close (self->spi_fd); self->spi_fd = -1; }
+    {
+      close (self->spi_fd);
+      self->spi_fd = -1;
+    }
 
   fpi_device_close_complete (dev, NULL);
 }
 
-static void mafp_enroll (FpDevice *dev) { mafp_dispatch (FPI_DEVICE_MAFP8800 (dev), mafp_enroll_run); }
-static void mafp_verify (FpDevice *dev) { mafp_dispatch (FPI_DEVICE_MAFP8800 (dev), mafp_verify_run); }
+static void
+mafp_enroll (FpDevice *dev)
+{
+  mafp_dispatch (FPI_DEVICE_MAFP8800 (dev), mafp_enroll_run);
+}
+static void
+mafp_verify (FpDevice *dev)
+{
+  mafp_dispatch (FPI_DEVICE_MAFP8800 (dev), mafp_verify_run);
+}
 
 static void
 mafp_cancel (FpDevice *dev)
 {
   FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (dev);
+
   g_mutex_lock (&self->lock);
   self->canceled = TRUE;
   g_mutex_unlock (&self->lock);
@@ -1599,7 +1690,11 @@ static const FpIdEntry mafp_id_table[] = {
   { .udev_types = 0 }
 };
 
-static void fpi_device_mafp8800_init (FpiDeviceMafp8800 *self) { self->spi_fd = -1; }
+static void
+fpi_device_mafp8800_init (FpiDeviceMafp8800 *self)
+{
+  self->spi_fd = -1;
+}
 
 static void
 fpi_device_mafp8800_finalize (GObject *obj)
