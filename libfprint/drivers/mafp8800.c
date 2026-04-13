@@ -11,6 +11,9 @@
  * Architecture: FpDevice subclass with a dedicated worker thread.
  * All SPI operations run in the worker thread. The main GLib thread
  * dispatches enroll/verify/identify requests via GCond signaling.
+ *
+ * For detailed documentation (protocol, matching algorithm, project history):
+ * https://github.com/IngeniousIdiocy/mafp8800-fingerprint-driver
  */
 
 #define FP_COMPONENT "mafp8800"
