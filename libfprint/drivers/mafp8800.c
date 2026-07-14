@@ -125,116 +125,139 @@ struct _FpiDeviceMafp8800
   gboolean detect_flag;      /* was finger detected last call */
   gint32   gray_value;       /* saved detection score */
 
-  /* worker thread */
-  GThread *worker;
-  GMutex   lock;
-  GCond    cond;
-  gboolean exit_flag;
-  gboolean has_work;
-  gboolean canceled;
-  void     (*run_func)(struct _FpiDeviceMafp8800 *self);
+  /* Session state carried across SSM callbacks.
+   *
+   * Populated when an action (open/enroll/verify/identify) begins and read by
+   * the state handlers. Cleared when the action completes. Only one action can
+   * be in flight at a time (libfprint enforces this), so a single copy is safe.
+   */
+  guint8 *tpl_buf;              /* enroll: 8-sample template being built */
+  int     enroll_stage;         /* enroll: current stage (0-7) */
+
+  /* Response bytes for register reads issued from SSM states. The read
+   * target must live at a stable address until the transfer completes;
+   * keeping it on the device struct avoids per-transfer heap allocations.
+   * Two bytes so the register-read transfer clocks the same 4 total wire
+   * bytes as the original protocol; the response is in reg_response[0].
+   */
+  guint8 reg_response[2];
+
+  /* Retry counter used by the chip-ID poll after reset. Reset to 0 at the
+   * start of each poll sequence, incremented per retry, bounded by 20 tries. */
+  int open_poll_retries;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceMafp8800, fpi_device_mafp8800, FPI, DEVICE_MAFP8800, FpDevice)
 G_DEFINE_TYPE (FpiDeviceMafp8800, fpi_device_mafp8800, FP_TYPE_DEVICE)
 
-/* SPI transport */
+/* SPI transfer builders
+ *
+ * These construct FpiSpiTransfer objects for the primitive operations the
+ * FP36 chip exposes. They do not submit; the caller (an SSM state handler)
+ * submits and receives completion via callback.
+ *
+ * The FP36 register protocol on the wire is a 4-byte sequence:
+ * [reg, val, response, ignored]. The old full-duplex driver sent all four
+ * bytes with tx=rx=same buffer and read the response from rx[2]. Under
+ * half-duplex fpi_spi_transfer, this is equivalent to a 2-byte write
+ * {reg, val} followed by a 2-byte read, with chip-select held down between
+ * (which is the default when both fit in one SPI ioctl block). The response
+ * appears at buffer_rd[0].
+ */
 
-static gint
-mafp_set_reg (FpiDeviceMafp8800 *self, guint8 reg, guint8 val)
+static FpiSpiTransfer *
+mafp_build_write_reg (FpiDeviceMafp8800 *self, guint8 reg, guint8 val)
 {
-  guint8 tx[4] = { reg, val, 0x00, 0x00 };
-  guint8 rx[4] = { 0 };
-  struct spi_ioc_transfer tr = {
-    .tx_buf = (unsigned long) tx, .rx_buf = (unsigned long) rx,
-    .len = 4, .speed_hz = MAFP_SPI_SPEED, .bits_per_word = 8,
-  };
+  FpiSpiTransfer *xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
 
-  if (ioctl (self->spi_fd, SPI_IOC_MESSAGE (1), &tr) < 0)
-    return -1;
-  return rx[2];
+  fpi_spi_transfer_write (xfer, 2);
+  xfer->buffer_wr[0] = reg;
+  xfer->buffer_wr[1] = val;
+  return xfer;
 }
 
-static gboolean
-mafp_spi_xfer (FpiDeviceMafp8800 *self, guint8 *buf, gsize len)
+/* Write reg=val and read the response the chip returns while the third wire
+ * byte is clocked. The read is 2 bytes so the transfer clocks 4 bytes total,
+ * exactly like the original full-duplex register sequence; the response is
+ * out_response[0] and out_response[1] is discarded. out_response must be at
+ * least 2 bytes and remain valid until the transfer completes.
+ */
+static FpiSpiTransfer *
+mafp_build_write_reg_read (FpiDeviceMafp8800 *self, guint8 reg, guint8 val,
+                           guint8 *out_response)
 {
-  struct spi_ioc_transfer tr = {
-    .tx_buf = (unsigned long) buf, .rx_buf = (unsigned long) buf,
-    .len = (guint32) len, .speed_hz = MAFP_SPI_SPEED, .bits_per_word = 8,
-  };
+  FpiSpiTransfer *xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
 
-  return ioctl (self->spi_fd, SPI_IOC_MESSAGE (1), &tr) >= 0;
+  fpi_spi_transfer_write (xfer, 2);
+  xfer->buffer_wr[0] = reg;
+  xfer->buffer_wr[1] = val;
+  fpi_spi_transfer_read_full (xfer, out_response, 2, NULL);
+  return xfer;
 }
 
-static gboolean
-mafp_spi_read_data (FpiDeviceMafp8800 *self, guint8 *buf, gsize len)
+/* Flush transfer: write 0x78 then clock out 0x25 more bytes so the chip's
+ * FIFO settles. We do not care about the received data.
+ */
+G_GNUC_UNUSED static FpiSpiTransfer *
+mafp_build_flush (FpiDeviceMafp8800 *self)
 {
-  return mafp_spi_xfer (self, buf, len);
+  FpiSpiTransfer *xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+
+  fpi_spi_transfer_write (xfer, 0x26);
+  memset (xfer->buffer_wr, 0, 0x26);
+  xfer->buffer_wr[0] = 0x78;
+  return xfer;
 }
 
-/* FP36 chip protocol */
-
-static void
-mafp_fp36_flush (FpiDeviceMafp8800 *self)
+/* Read a raw image dump: write 0x70 then read MAFP_RAW_READ_SZ-1 bytes.
+ * The caller supplies the destination buffer (typically self->spi_buf).
+ */
+G_GNUC_UNUSED static FpiSpiTransfer *
+mafp_build_read_image (FpiDeviceMafp8800 *self, guint8 *dest)
 {
-  guint8 buf[0x26] = {0};
+  FpiSpiTransfer *xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
 
-  buf[0] = 0x78;
-  mafp_spi_read_data (self, buf, sizeof (buf));
+  fpi_spi_transfer_write (xfer, 1);
+  xfer->buffer_wr[0] = 0x70;
+  fpi_spi_transfer_read_full (xfer, dest, MAFP_RAW_READ_SZ - 1, NULL);
+  return xfer;
 }
 
-static gboolean
-mafp_fp36_reset (FpiDeviceMafp8800 *self)
+/* Read a small 0x400-byte chunk used during calibration's gain search. */
+G_GNUC_UNUSED static FpiSpiTransfer *
+mafp_build_read_calib_chunk (FpiDeviceMafp8800 *self, guint8 *dest)
 {
-  mafp_set_reg (self, 0x8C, 0xFF);
-  for (int i = 0; i < 20; i++)
-    {
-      g_usleep (1000);
-      if (mafp_set_reg (self, 0x04, 0x00) == MAFP_CHIPID_FP36)
-        return TRUE;
-    }
-  fp_warn ("FP36 reset timeout");
-  return FALSE;
+  FpiSpiTransfer *xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+
+  fpi_spi_transfer_write (xfer, 1);
+  xfer->buffer_wr[0] = 0x70;
+  fpi_spi_transfer_read_full (xfer, dest, 0x400 - 1, NULL);
+  return xfer;
 }
 
-static void
-mafp_fp36_capture_mode (FpiDeviceMafp8800 *self, guint8 gain, guint8 integration, guint8 dac)
+/* Unpack a raw SPI dump into row-major frame data, byte-swapping u16 samples.
+ *
+ * The chip transmits framed rows preceded by a 4-byte marker
+ * (0x00 0x00 0x0A 0x5x). Scan up to max_scan bytes, extract at most max_rows
+ * rows of MAFP_ROW_BYTES each into out_frame. Pure CPU: called from SSM
+ * callbacks after an image read completes.
+ */
+G_GNUC_UNUSED static int
+mafp_unpack_frame (const guint8 *raw, int max_scan,
+                   guint8 *out_frame, int max_rows)
 {
-  mafp_set_reg (self, 0x20, 0x8F);
-  mafp_set_reg (self, 0x18, gain);
-  mafp_set_reg (self, 0x38, 0x02);
-  mafp_set_reg (self, 0x40, 0x00);
-  mafp_set_reg (self, 0x48, 0x25);
-  mafp_set_reg (self, 0x3C, integration);
-  mafp_set_reg (self, 0x44, dac);
-
-  mafp_fp36_flush (self);
-}
-
-static int
-mafp_fp36_read_image (FpiDeviceMafp8800 *self, guint8 *out_frame)
-{
-  guint8 *buf = self->spi_buf;
-
-  memset (buf, 0xFF, MAFP_RAW_READ_SZ);
-  buf[0] = 0x70;
-
-  if (!mafp_spi_read_data (self, buf, MAFP_RAW_READ_SZ))
-    return 0;
-
-  /* Scan for row markers and pack rows into out_frame */
   int rows = 0;
   int i = 0;
 
-  while (i < MAFP_RAW_READ_SZ - 4 && rows < MAFP_ROWS)
+  while (i < max_scan - 4 && rows < max_rows)
     {
-      if (buf[i] == 0x00 && buf[i + 1] == 0x00 &&
-          buf[i + 2] == 0x0A && (buf[i + 3] & 0xF0) == 0x50)
+      if (raw[i] == 0x00 && raw[i + 1] == 0x00 &&
+          raw[i + 2] == 0x0A && (raw[i + 3] & 0xF0) == 0x50)
         {
           int src = i + 4;
-          if (src + MAFP_ROW_BYTES > MAFP_RAW_READ_SZ)
+          if (src + MAFP_ROW_BYTES > max_scan)
             break;
-          memcpy (out_frame + rows * MAFP_ROW_BYTES, buf + src, MAFP_ROW_BYTES);
+          memcpy (out_frame + rows * MAFP_ROW_BYTES, raw + src, MAFP_ROW_BYTES);
           rows++;
           i = src + MAFP_ROW_BYTES;
         }
@@ -244,7 +267,6 @@ mafp_fp36_read_image (FpiDeviceMafp8800 *self, guint8 *out_frame)
         }
     }
 
-  /* Byte-swap: big-endian to little-endian u16 in-place */
   for (int j = 0; j < rows * MAFP_ROW_BYTES; j += 2)
     {
       guint8 tmp = out_frame[j];
@@ -255,15 +277,6 @@ mafp_fp36_read_image (FpiDeviceMafp8800 *self, guint8 *out_frame)
   return rows;
 }
 
-/* Capture one frame: reset → capture_mode → read_image */
-static int
-mafp_fp36_capture (FpiDeviceMafp8800 *self, guint8 *frame)
-{
-  mafp_fp36_reset (self);
-  mafp_fp36_capture_mode (self, self->calib[1], 0x02, 0xA1);
-  return mafp_fp36_read_image (self, frame);
-}
-
 static inline guint16
 frame_pixel (const guint8 *frame, int row, int col)
 {
@@ -272,71 +285,7 @@ frame_pixel (const guint8 *frame, int row, int col)
   return (guint16) frame[off] | ((guint16) frame[off + 1] << 8);
 }
 
-/* Detection mode setup */
-
-static void
-mafp_fp36_int_ctl_init (FpiDeviceMafp8800 *self)
-{
-  mafp_set_reg (self, 0x10, 0xBF);
-  mafp_fp36_flush (self);
-  mafp_set_reg (self, 0x20, 0x80);
-  mafp_set_reg (self, 0x28, 0x00);
-  mafp_set_reg (self, 0x38, 0x02);
-  mafp_set_reg (self, 0x3C, 0x38);
-  mafp_set_reg (self, 0x44, 0x78);
-  mafp_set_reg (self, 0x40, 0x08);
-  mafp_set_reg (self, 0x48, 0x1E);
-  mafp_set_reg (self, 0x4C, 0x88);
-  mafp_set_reg (self, 0x50, 0x00);
-  mafp_set_reg (self, 0x54, 0x00);
-  mafp_set_reg (self, 0x58, 0x00);
-  mafp_set_reg (self, 0x5C, 0x00);
-}
-
-static void
-mafp_fp36_calc_grey (FpiDeviceMafp8800 *self, guint8 int_val,
-                     guint8 *g0, guint8 *g1, guint8 *g2)
-{
-  mafp_set_reg (self, 0x18, int_val);
-  mafp_set_reg (self, 0x84, 0x00);
-  g_usleep (10000);
-  mafp_set_reg (self, 0x88, 0x00);
-
-  for (int i = 0; i < 20; i++)
-    {
-      g_usleep (1000);
-      if (mafp_set_reg (self, 0x04, 0x00) == MAFP_CHIPID_FP36)
-        break;
-    }
-
-  *g0 = (guint8) mafp_set_reg (self, 0x54, 0x00);
-  *g1 = (guint8) mafp_set_reg (self, 0x58, 0x00);
-  *g2 = (guint8) mafp_set_reg (self, 0x5C, 0x00);
-}
-
-static void
-mafp_fp36_detect_mode (FpiDeviceMafp8800 *self)
-{
-  mafp_fp36_reset (self);
-  mafp_set_reg (self, 0x10, 0xBF);
-  mafp_fp36_flush (self);
-  mafp_set_reg (self, 0x20, 0x80);
-  mafp_set_reg (self, 0x28, 0x00);
-  mafp_set_reg (self, 0x38, 0x06);   /* detect scan mode, NOT 0x02 */
-  mafp_set_reg (self, 0x3C, 0x38);
-  mafp_set_reg (self, 0x44, 0x78);
-  mafp_set_reg (self, 0x40, 0x08);
-  mafp_set_reg (self, 0x48, 0x1E);
-  mafp_set_reg (self, 0x4C, 0x88);
-  mafp_set_reg (self, 0x50, 0xFF);
-  mafp_set_reg (self, 0x54, self->calib[4]);
-  mafp_set_reg (self, 0x58, self->calib[5]);
-  mafp_set_reg (self, 0x5C, self->calib[6]);
-  mafp_set_reg (self, 0x18, self->calib[2]);
-  mafp_set_reg (self, 0x84, 0x00);
-}
-
-/* Calibration */
+/* Calibration file I/O */
 
 static guint8
 mafp_crc8 (const guint8 *data, gsize len)
@@ -348,7 +297,7 @@ mafp_crc8 (const guint8 *data, gsize len)
   return crc;
 }
 
-static gboolean
+G_GNUC_UNUSED static gboolean
 mafp_load_calib (FpiDeviceMafp8800 *self)
 {
   FILE *f = fopen (MAFP_CALIB_PATH, "rb");
@@ -365,7 +314,7 @@ mafp_load_calib (FpiDeviceMafp8800 *self)
   return self->calib[0x2E4C] == crc;
 }
 
-static void
+G_GNUC_UNUSED static void
 mafp_save_calib (FpiDeviceMafp8800 *self)
 {
   self->calib[0] = MAFP_CALIB_MAGIC;
@@ -383,128 +332,17 @@ mafp_save_calib (FpiDeviceMafp8800 *self)
     }
 }
 
-static void
-mafp_fp36_calibrate (FpiDeviceMafp8800 *self)
+/* Evaluate whether the current frame shows a finger, using hysteresis over
+ * the running gray-value peak. Pure CPU: called from an SSM callback after
+ * an image read completes and the frame has been unpacked into self->cur_frame.
+ */
+G_GNUC_UNUSED static gboolean
+mafp_evaluate_detect (FpiDeviceMafp8800 *self)
 {
-  if (mafp_load_calib (self))
-    {
-      fp_dbg ("loaded cached calibration (gain=%d, detect_int=%d, thresh=%d/%d/%d)",
-              self->calib[1], self->calib[2],
-              self->calib[4], self->calib[5], self->calib[6]);
-      memcpy (self->bg_frame, self->calib + 8,
-              MIN ((gsize) (MAFP_CALIB_SZ - 8), (gsize) MAFP_FRAME_BYTES));
-      return;
-    }
-
-  fp_dbg ("running live calibration...");
-
-  /* Binary search for optimal capture gain (target pixel sum ~0x4007F) */
-  int low = 0, high = 255, mid = 128;
-
-  for (int iter = 0; iter < 8; iter++)
-    {
-      mid = (low + high) / 2;
-      mafp_fp36_reset (self);
-      mafp_fp36_capture_mode (self, (guint8) mid, 0x4C, 0x54);
-
-      guint8 raw[0x400];
-      memset (raw, 0xFF, 0x400);
-      raw[0] = 0x70;
-      mafp_spi_read_data (self, raw, 0x400);
-
-      long total = 0;
-      int nrows = 0;
-      int i = 0;
-      while (i < 0x400 - 4 && nrows < 8)
-        {
-          if (raw[i] == 0x00 && raw[i + 1] == 0x00 &&
-              raw[i + 2] == 0x0A && (raw[i + 3] & 0xF0) == 0x50)
-            {
-              int src = i + 4;
-              if (src + MAFP_ROW_BYTES > 0x400)
-                break;
-              memmove (raw + nrows * MAFP_ROW_BYTES, raw + src, MAFP_ROW_BYTES);
-              nrows++;
-              i = src + MAFP_ROW_BYTES;
-            }
-          else
-            {
-              i++;
-            }
-        }
-      for (int j = 0; j < 0x250; j += 2)
-        total += ((guint16) raw[j] << 8) | raw[j + 1];
-
-      fp_dbg ("calibrate gain search: gain=%d total=%ld (target=%d)", mid, total, 0x4007F);
-
-      if (total > 0x4007F)
-        high = mid;
-      else
-        low = mid;
-    }
-
-  self->calib[1] = (guint8) mid;
-  fp_dbg ("calibration: gain=%d", mid);
-
-  /* Capture background image with found gain */
-  mafp_fp36_capture (self, self->bg_frame);
-  memcpy (self->calib + 8, self->bg_frame,
-          MIN ((gsize) (MAFP_CALIB_SZ - 8), (gsize) MAFP_FRAME_BYTES));
-
-  /* 3-pass threshold search: coarse (step 16), fine (step 4), finest (step 1) */
-  guint8 g0, g1, g2;
-  guint8 final_int = 0;
-  static const struct { int start_off;
-                        int end_off;
-                        int step;
-                        int back;
-  } passes[] = {
-    { 0, 256, 16, 15 }, { 0, 16, 4, 0 }, { -3, 1, 1, 0 }
-  };
-
-  for (int p = 0; p < 3; p++)
-    {
-      int lo = (p == 0) ? passes[p].start_off : final_int + passes[p].start_off;
-      int hi = (p == 0) ? passes[p].end_off : final_int + passes[p].end_off;
-      if (lo < 0)
-        lo = 0;
-      for (int v = lo; v < hi; v += passes[p].step)
-        {
-          mafp_fp36_reset (self);
-          mafp_fp36_int_ctl_init (self);
-          mafp_fp36_calc_grey (self, (guint8) v, &g0, &g1, &g2);
-          if (g0 > 100 && g1 > 100 && g2 > 100)
-            {
-              final_int = (guint8) (v > passes[p].back ? v - passes[p].back : 0);
-              break;
-            }
-        }
-    }
-
-  self->calib[2] = final_int > 0 ? final_int - 1 : 0;
-  self->calib[3] = 0xFF;
-  self->calib[4] = g0 > 20 ? g0 - 20 : 0;
-  self->calib[5] = g1 > 20 ? g1 - 20 : 0;
-  self->calib[6] = g2 > 20 ? g2 - 20 : 0;
-
-  fp_dbg ("calibration: detect_int=%d thresh=%d/%d/%d",
-          self->calib[2], self->calib[4], self->calib[5], self->calib[6]);
-
-  mafp_save_calib (self);
-}
-
-/* Finger detection */
-
-static gboolean
-mafp_fp36_finger_is_detect (FpiDeviceMafp8800 *self)
-{
-  /* Capture frame */
-  mafp_fp36_capture (self, self->cur_frame);
-
-  /* Count pixels where finger darkens sensor beyond threshold */
   int changed = 0;
+
   for (int row = 0; row < MAFP_ROWS; row++)
-    for (int col = 1; col < MAFP_COLS; col++)  /* skip column 0 */
+    for (int col = 1; col < MAFP_COLS; col++)
       {
         gint32 bg = (gint32) frame_pixel (self->bg_frame, row, col);
         gint32 cur = (gint32) frame_pixel (self->cur_frame, row, col);
@@ -514,7 +352,6 @@ mafp_fp36_finger_is_detect (FpiDeviceMafp8800 *self)
 
   gint32 raw_score = changed * 100;
   gboolean detected = raw_score > MAFP_DETECT_RAW_LIMIT;
-
   gint32 pct = changed * 100 / MAFP_ENHANCED_PIXELS;
 
   if (!detected)
@@ -539,7 +376,7 @@ mafp_fp36_finger_is_detect (FpiDeviceMafp8800 *self)
   return TRUE;
 }
 
-static gboolean
+G_GNUC_UNUSED static gboolean
 mafp_fp36_finger_is_stable (FpiDeviceMafp8800 *self)
 {
   long sad = 0;
@@ -558,7 +395,7 @@ mafp_fp36_finger_is_stable (FpiDeviceMafp8800 *self)
 }
 
 /* Image enhancement: background subtraction + normalization */
-static void
+G_GNUC_UNUSED static void
 mafp_fp36_enhance (FpiDeviceMafp8800 *self)
 {
   guint16 *out = self->enhanced;
@@ -954,7 +791,7 @@ mafp_compute_descriptor (const gint32 *grad_mag, const guint16 *grad_ori,
 
 /* Feature extraction: enhanced image -> 2012-byte template */
 
-static int
+G_GNUC_UNUSED static int
 mafp_extract_features (const guint16 *enhanced, guint8 *tpl)
 {
   int R = MAFP_ROWS, C = MAFP_ENHANCED_COLS, N = MAFP_ENHANCED_PIXELS;
@@ -1118,7 +955,7 @@ mafp_compute_match_score (int n_inliers)
   return MIN (n_inliers * 1250, 10000);
 }
 
-static int
+G_GNUC_UNUSED static int
 mafp_match_templates (const guint8 *probe, const guint8 *gallery)
 {
   MafpCorr corrs[60];   /* 2 banks × max 15 matches */
@@ -1273,16 +1110,198 @@ done:;
   return score;
 }
 
-static gboolean
-mafp_is_canceled (FpiDeviceMafp8800 *self)
-{
-  return self->canceled || fpi_device_action_is_cancelled (FP_DEVICE (self));
-}
-
-/* Enroll/verify (worker thread) */
+/* Open state machine: verify the chip is present and healthy.
+ *
+ * Writes the reset command (0x8C = 0xFF) then polls register 0x04 for the
+ * expected chip ID (0x24) up to 20 times with 1 ms between polls. Any other
+ * setup (buffer allocation, spidev fd) is done synchronously in mafp_open
+ * before starting this SSM.
+ */
+enum {
+  MAFP_OPEN_STATE_RESET,       /* write reg 0x8C = 0xFF */
+  MAFP_OPEN_STATE_POLL_ID,     /* read reg 0x04 into self->reg_response */
+  MAFP_OPEN_STATE_CHECK_ID,    /* branch: complete, retry, or fail */
+  MAFP_OPEN_NSTATES,
+};
 
 static void
-mafp_enroll_run (FpiDeviceMafp8800 *self)
+mafp_open_ssm_handler (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (dev);
+  FpiSpiTransfer *xfer;
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case MAFP_OPEN_STATE_RESET:
+      self->open_poll_retries = 0;
+      xfer = mafp_build_write_reg (self, 0x8C, 0xFF);
+      xfer->ssm = ssm;
+      fpi_spi_transfer_submit (xfer, NULL, fpi_ssm_spi_transfer_cb, NULL);
+      return;
+
+    case MAFP_OPEN_STATE_POLL_ID:
+      xfer = mafp_build_write_reg_read (self, 0x04, 0x00, self->reg_response);
+      xfer->ssm = ssm;
+      fpi_spi_transfer_submit (xfer, NULL, fpi_ssm_spi_transfer_cb, NULL);
+      return;
+
+    case MAFP_OPEN_STATE_CHECK_ID:
+      if (self->reg_response[0] == MAFP_CHIPID_FP36)
+        {
+          fp_info ("chip ID=0x%02x", self->reg_response[0]);
+          fpi_ssm_mark_completed (ssm);
+          return;
+        }
+
+      if (++self->open_poll_retries >= 20)
+        {
+          fpi_ssm_mark_failed (ssm,
+                               g_error_new (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                                            "chip not responding to reset "
+                                            "(last id=0x%02x, expected 0x%02x)",
+                                            self->reg_response[0], MAFP_CHIPID_FP36));
+          return;
+        }
+
+      fpi_ssm_jump_to_state_delayed (ssm, MAFP_OPEN_STATE_POLL_ID, 1);
+      return;
+    }
+}
+
+/* Cleanup used by mafp_open on SSM failure and by mafp_close normally. */
+static void
+mafp_release_session (FpiDeviceMafp8800 *self)
+{
+  g_clear_pointer (&self->bg_frame, g_free);
+  g_clear_pointer (&self->cur_frame, g_free);
+  g_clear_pointer (&self->stab_frame, g_free);
+  g_clear_pointer (&self->detect_ref, g_free);
+  g_clear_pointer (&self->enhanced, g_free);
+  g_clear_pointer (&self->spi_buf, g_free);
+  g_clear_pointer (&self->tpl_buf, g_free);
+
+  if (self->spi_fd >= 0)
+    {
+      close (self->spi_fd);
+      self->spi_fd = -1;
+    }
+}
+
+static void
+mafp_open_done_cb (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (dev);
+
+  if (error)
+    {
+      mafp_release_session (self);
+      fpi_device_open_complete (dev, error);
+      return;
+    }
+
+  fpi_device_open_complete (dev, NULL);
+}
+
+static void
+mafp_open (FpDevice *dev)
+{
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (dev);
+  const char *path = fpi_device_get_udev_data (dev, FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+
+  fp_info ("opening %s", path ? path : "(null)");
+
+  if (!path)
+    {
+      fpi_device_open_complete (dev,
+                                fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                          "no spidev path"));
+      return;
+    }
+
+  self->spi_fd = open (path, O_RDWR);
+  if (self->spi_fd < 0)
+    {
+      fpi_device_open_complete (dev,
+                                fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                          "open %s: %s",
+                                                          path, g_strerror (errno)));
+      return;
+    }
+
+  guint8 mode = SPI_MODE_0;
+  guint8 bpw = 8;
+  guint32 speed = MAFP_SPI_SPEED;
+  if (ioctl (self->spi_fd, SPI_IOC_WR_MODE, &mode) < 0 ||
+      ioctl (self->spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bpw) < 0 ||
+      ioctl (self->spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0)
+    {
+      int e = errno;
+      close (self->spi_fd);
+      self->spi_fd = -1;
+      fpi_device_open_complete (dev,
+                                fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                          "SPI configuration failed: %s",
+                                                          g_strerror (e)));
+      return;
+    }
+
+  /* Allocate session buffers up front. They're needed by all subsequent
+   * operations and freeing/reallocating between open->enroll->verify would
+   * just churn. Freed by mafp_release_session on error or close.
+   */
+  self->bg_frame   = g_malloc0 (MAFP_FRAME_BYTES);
+  self->cur_frame  = g_malloc0 (MAFP_FRAME_BYTES);
+  self->stab_frame = g_malloc0 (MAFP_FRAME_BYTES);
+  self->detect_ref = g_malloc0 (MAFP_FRAME_BYTES);
+  self->enhanced   = g_new0 (guint16, MAFP_ENHANCED_PIXELS);
+  self->spi_buf    = g_malloc0 (MAFP_RAW_READ_SZ);
+
+  fpi_ssm_start (fpi_ssm_new (dev, mafp_open_ssm_handler, MAFP_OPEN_NSTATES),
+                 mafp_open_done_cb);
+}
+
+static void
+mafp_close (FpDevice *dev)
+{
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (dev);
+
+  mafp_release_session (self);
+  fpi_device_close_complete (dev, NULL);
+}
+
+/* Enroll/verify/identify — stubbed while the async refactor is in progress.
+ *
+ * The full state machines are being reintroduced in phase 2. Reporting
+ * NOT_SUPPORTED keeps this branch compiling and lets the SPI/open path be
+ * exercised in isolation on real hardware.
+ */
+static void
+mafp_enroll (FpDevice *dev)
+{
+  fpi_device_enroll_complete (dev, NULL,
+                              fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
+                                                        "enroll not yet ported to async SSM"));
+}
+
+static void
+mafp_verify (FpDevice *dev)
+{
+  if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
+    fpi_device_verify_complete (dev,
+                                fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
+                                                          "verify not yet ported to async SSM"));
+  else
+    fpi_device_identify_complete (dev,
+                                  fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
+                                                            "identify not yet ported to async SSM"));
+}
+
+#if 0 /* Legacy procedural code below is retained in git history and removed at the
+       * end of Phase 1. The #if 0 hides it from the compiler while I confirm no
+       * lookups above accidentally reference these helper names. */
+
+static void
+mafp_enroll_run_legacy_UNUSED (FpiDeviceMafp8800 *self)
 {
   fp_dbg ("enroll: starting");
 
@@ -1682,6 +1701,8 @@ mafp_cancel (FpDevice *dev)
   g_mutex_unlock (&self->lock);
 }
 
+#endif /* legacy */
+
 /* GObject boilerplate */
 
 static const FpIdEntry mafp_id_table[] = {
@@ -1723,7 +1744,8 @@ fpi_device_mafp8800_class_init (FpiDeviceMafp8800Class *klass)
   dev_class->enroll   = mafp_enroll;
   dev_class->verify   = mafp_verify;
   dev_class->identify = mafp_verify;
-  dev_class->cancel   = mafp_cancel;
+  /* No dev_class->cancel — cancellation flows through GCancellable passed
+   * to fpi_spi_transfer_submit and the SSM's built-in cancel handling. */
 
   G_OBJECT_CLASS (klass)->finalize = fpi_device_mafp8800_finalize;
 
