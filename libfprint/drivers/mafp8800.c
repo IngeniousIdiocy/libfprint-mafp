@@ -1735,6 +1735,54 @@ mafp_close (FpDevice *dev)
   fpi_device_close_complete (dev, NULL);
 }
 
+/* CPU-bound frame processing (enhancement + feature extraction, roughly
+ * 50-150 ms) runs on a GTask worker thread so the main loop is not blocked,
+ * mirroring how the image-device layer runs minutiae detection (see
+ * fp_image_detect_minutiae). The parent SSM is parked in its current state
+ * while the task runs; the completion callback advances or fails it. */
+
+static void
+mafp_process_thread_func (GTask *task, gpointer source_object,
+                          gpointer task_data, GCancellable *cancellable)
+{
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (source_object);
+  guint8 *tpl_dest = task_data;
+
+  mafp_fp36_enhance (self);
+  mafp_extract_features (self->enhanced, tpl_dest);
+  g_task_return_boolean (task, TRUE);
+}
+
+static void
+mafp_start_process (FpiDeviceMafp8800 *self, guint8 *tpl_dest,
+                    GAsyncReadyCallback callback, FpiSsm *ssm)
+{
+  g_autoptr(GTask) task = NULL;
+
+  task = g_task_new (self, fpi_device_get_cancellable (FP_DEVICE (self)),
+                     callback, ssm);
+  g_task_set_task_data (task, tpl_dest, NULL);
+  g_task_run_in_thread (task, mafp_process_thread_func);
+}
+
+static void
+mafp_enroll_process_cb (GObject *source, GAsyncResult *res, gpointer user_data)
+{
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (source);
+  FpiSsm *ssm = user_data;
+  GError *error = NULL;
+
+  if (!g_task_propagate_boolean (G_TASK (res), &error))
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  self->tpl_count++;
+  fpi_device_enroll_progress (FP_DEVICE (self), self->enroll_stage, NULL, NULL);
+  fpi_ssm_next_state (ssm);
+}
+
 /* Enroll SSM: calibrate, enter detection mode, then for each of the 8
  * stages wait for a finger, wait for it to stabilize, extract features,
  * and wait for removal. Unstable captures retry the same stage. */
@@ -1829,13 +1877,10 @@ mafp_enroll_ssm_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case MAFP_ENROLL_PROCESS:
-      mafp_fp36_enhance (self);
-      mafp_extract_features (self->enhanced,
-                             self->tpl_buf + MAFP_TPL_HDR_SZ +
-                             self->tpl_count * MAFP_TPL_SAMPLE_SZ);
-      self->tpl_count++;
-      fpi_device_enroll_progress (dev, self->enroll_stage, NULL, NULL);
-      fpi_ssm_next_state (ssm);
+      mafp_start_process (self,
+                          self->tpl_buf + MAFP_TPL_HDR_SZ +
+                          self->tpl_count * MAFP_TPL_SAMPLE_SZ,
+                          mafp_enroll_process_cb, ssm);
       return;
 
     case MAFP_ENROLL_REMOVE_DELAY:
@@ -1920,6 +1965,97 @@ enum {
   MAFP_VERIFY_NSTATES
 };
 
+/* Runs on the main loop once the worker thread has extracted the probe
+ * template; matching itself is a few milliseconds so it stays inline. */
+static void
+mafp_verify_match_cb (GObject *source, GAsyncResult *res, gpointer user_data)
+{
+  FpiDeviceMafp8800 *self = FPI_DEVICE_MAFP8800 (source);
+  FpDevice *dev = FP_DEVICE (self);
+  FpiSsm *ssm = user_data;
+  GError *error = NULL;
+
+  if (!g_task_propagate_boolean (G_TASK (res), &error))
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
+    {
+      FpPrint *enrolled = NULL;
+      g_autoptr(GVariant) var = NULL;
+      gboolean matched = FALSE;
+
+      fpi_device_get_verify_data (dev, &enrolled);
+      g_object_get (enrolled, "fpi-data", &var, NULL);
+
+      if (var)
+        {
+          gsize tpl_sz = 0;
+          const guint8 *tpl = g_variant_get_fixed_array (var, &tpl_sz, 1);
+          if (tpl_sz >= MAFP_TPL_HDR_SZ)
+            {
+              gint32 count = 0;
+              memcpy (&count, tpl, sizeof (gint32));
+              for (int i = 0; i < count && i < MAFP_ENROLL_STAGES; i++)
+                {
+                  const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
+                  int score = mafp_match_templates (self->probe_tpl, sample);
+                  fp_dbg ("verify: template %d score=%d (thresh=%d)",
+                          i, score, MAFP_MATCH_THRESH);
+                  if (score >= MAFP_MATCH_THRESH)
+                    {
+                      matched = TRUE;
+                      break;
+                    }
+                }
+            }
+        }
+
+      fpi_device_verify_report (dev,
+                                matched ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
+                                NULL, NULL);
+    }
+  else /* IDENTIFY */
+    {
+      GPtrArray *gallery = NULL;
+      FpPrint *matched_print = NULL;
+
+      fpi_device_get_identify_data (dev, &gallery);
+
+      for (guint gi = 0; gi < gallery->len && !matched_print; gi++)
+        {
+          FpPrint *p = g_ptr_array_index (gallery, gi);
+          g_autoptr(GVariant) var = NULL;
+          g_object_get (p, "fpi-data", &var, NULL);
+          if (!var)
+            continue;
+
+          gsize tpl_sz = 0;
+          const guint8 *tpl = g_variant_get_fixed_array (var, &tpl_sz, 1);
+          if (tpl_sz < MAFP_TPL_HDR_SZ)
+            continue;
+
+          gint32 count = 0;
+          memcpy (&count, tpl, sizeof (gint32));
+          for (int i = 0; i < count && i < MAFP_ENROLL_STAGES; i++)
+            {
+              const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
+              if (mafp_match_templates (self->probe_tpl, sample) >= MAFP_MATCH_THRESH)
+                {
+                  matched_print = p;
+                  break;
+                }
+            }
+        }
+
+      fpi_device_identify_report (dev, matched_print, NULL, NULL);
+    }
+
+  fpi_ssm_mark_completed (ssm);
+}
+
 static void
 mafp_verify_ssm_handler (FpiSsm *ssm, FpDevice *dev)
 {
@@ -1980,87 +2116,8 @@ mafp_verify_ssm_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case MAFP_VERIFY_MATCH:
-      {
-        FpiDeviceAction action = fpi_device_get_current_action (dev);
-
-        mafp_fp36_enhance (self);
-        mafp_extract_features (self->enhanced, self->probe_tpl);
-
-        if (action == FPI_DEVICE_ACTION_VERIFY)
-          {
-            FpPrint *enrolled = NULL;
-            g_autoptr(GVariant) var = NULL;
-            gboolean matched = FALSE;
-
-            fpi_device_get_verify_data (dev, &enrolled);
-            g_object_get (enrolled, "fpi-data", &var, NULL);
-
-            if (var)
-              {
-                gsize tpl_sz = 0;
-                const guint8 *tpl = g_variant_get_fixed_array (var, &tpl_sz, 1);
-                if (tpl_sz >= MAFP_TPL_HDR_SZ)
-                  {
-                    gint32 count = 0;
-                    memcpy (&count, tpl, sizeof (gint32));
-                    for (int i = 0; i < count && i < MAFP_ENROLL_STAGES; i++)
-                      {
-                        const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
-                        int score = mafp_match_templates (self->probe_tpl, sample);
-                        fp_dbg ("verify: template %d score=%d (thresh=%d)",
-                                i, score, MAFP_MATCH_THRESH);
-                        if (score >= MAFP_MATCH_THRESH)
-                          {
-                            matched = TRUE;
-                            break;
-                          }
-                      }
-                  }
-              }
-
-            fpi_device_verify_report (dev,
-                                      matched ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
-                                      NULL, NULL);
-          }
-        else /* IDENTIFY */
-          {
-            GPtrArray *gallery = NULL;
-            FpPrint *matched_print = NULL;
-
-            fpi_device_get_identify_data (dev, &gallery);
-
-            for (guint gi = 0; gi < gallery->len && !matched_print; gi++)
-              {
-                FpPrint *p = g_ptr_array_index (gallery, gi);
-                g_autoptr(GVariant) var = NULL;
-                g_object_get (p, "fpi-data", &var, NULL);
-                if (!var)
-                  continue;
-
-                gsize tpl_sz = 0;
-                const guint8 *tpl = g_variant_get_fixed_array (var, &tpl_sz, 1);
-                if (tpl_sz < MAFP_TPL_HDR_SZ)
-                  continue;
-
-                gint32 count = 0;
-                memcpy (&count, tpl, sizeof (gint32));
-                for (int i = 0; i < count && i < MAFP_ENROLL_STAGES; i++)
-                  {
-                    const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
-                    if (mafp_match_templates (self->probe_tpl, sample) >= MAFP_MATCH_THRESH)
-                      {
-                        matched_print = p;
-                        break;
-                      }
-                  }
-              }
-
-            fpi_device_identify_report (dev, matched_print, NULL, NULL);
-          }
-
-        fpi_ssm_mark_completed (ssm);
-        return;
-      }
+      mafp_start_process (self, self->probe_tpl, mafp_verify_match_cb, ssm);
+      return;
     }
 }
 
