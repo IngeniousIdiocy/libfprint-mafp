@@ -2005,6 +2005,8 @@ mafp_verify_match_cb (GObject *source, GAsyncResult *res, gpointer user_data)
             {
               gint32 count = 0;
               memcpy (&count, tpl, sizeof (gint32));
+              /* count comes from storage; clamp to what the blob holds */
+              count = MIN (count, (gint32) ((tpl_sz - MAFP_TPL_HDR_SZ) / MAFP_TPL_SAMPLE_SZ));
               for (int i = 0; i < count && i < MAFP_ENROLL_STAGES; i++)
                 {
                   const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
@@ -2046,6 +2048,8 @@ mafp_verify_match_cb (GObject *source, GAsyncResult *res, gpointer user_data)
 
           gint32 count = 0;
           memcpy (&count, tpl, sizeof (gint32));
+          /* count comes from storage; clamp to what the blob holds */
+          count = MIN (count, (gint32) ((tpl_sz - MAFP_TPL_HDR_SZ) / MAFP_TPL_SAMPLE_SZ));
           for (int i = 0; i < count && i < MAFP_ENROLL_STAGES; i++)
             {
               const guint8 *sample = tpl + MAFP_TPL_HDR_SZ + i * MAFP_TPL_SAMPLE_SZ;
