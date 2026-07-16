@@ -471,13 +471,16 @@ static void
 mafp_start_reg_seq (FpiDeviceMafp8800 *self, FpiSsm *parent,
                     const MafpRegEntry *seq, int len)
 {
+  FpiSsm *chld;
+
   g_assert (len <= (int) G_N_ELEMENTS (self->reg_seq));
   memcpy (self->reg_seq, seq, len * sizeof (MafpRegEntry));
   self->reg_seq_len = len;
   self->reg_seq_pos = 0;
-  fpi_ssm_start_subsm (parent, fpi_ssm_new (FP_DEVICE (self),
-                                            mafp_regseq_handler,
-                                            MAFP_REGSEQ_NSTATES));
+  chld = fpi_ssm_new (FP_DEVICE (self), mafp_regseq_handler,
+                      MAFP_REGSEQ_NSTATES);
+  fpi_ssm_silence_debug (chld);
+  fpi_ssm_start_subsm (parent, chld);
 }
 
 /* Enter capture mode: gain, integration, DAC, then flush the FIFO */
@@ -585,9 +588,11 @@ mafp_reset_ssm_handler (FpiSsm *ssm, FpDevice *dev)
 static void
 mafp_start_reset (FpiDeviceMafp8800 *self, FpiSsm *parent)
 {
-  fpi_ssm_start_subsm (parent, fpi_ssm_new (FP_DEVICE (self),
-                                            mafp_reset_ssm_handler,
-                                            MAFP_RESET_NSTATES));
+  FpiSsm *chld = fpi_ssm_new (FP_DEVICE (self), mafp_reset_ssm_handler,
+                              MAFP_RESET_NSTATES);
+
+  fpi_ssm_silence_debug (chld);
+  fpi_ssm_start_subsm (parent, chld);
 }
 
 /* Capture sub-SSM: reset, enter capture mode, read one raw dump and unpack
@@ -635,10 +640,12 @@ mafp_capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
 static void
 mafp_start_capture (FpiDeviceMafp8800 *self, FpiSsm *parent, guint8 *dest)
 {
+  FpiSsm *chld = fpi_ssm_new (FP_DEVICE (self), mafp_capture_ssm_handler,
+                              MAFP_CAPT_NSTATES);
+
+  fpi_ssm_silence_debug (chld);
   self->capture_dest = dest;
-  fpi_ssm_start_subsm (parent, fpi_ssm_new (FP_DEVICE (self),
-                                            mafp_capture_ssm_handler,
-                                            MAFP_CAPT_NSTATES));
+  fpi_ssm_start_subsm (parent, chld);
 }
 
 /* Calibration SSM: load the cached calibration if valid, otherwise run the
