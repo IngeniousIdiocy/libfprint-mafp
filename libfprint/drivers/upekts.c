@@ -196,8 +196,9 @@ struct read_msg_data
 static void __read_msg_async (FpDevice             *dev,
                               struct read_msg_data *udata);
 
-#define READ_MSG_DATA_CB_ERR(dev, udata, error) (udata)->callback (dev, \
-                                                                   READ_MSG_CMD, 0, 0, NULL, 0, (udata)->user_data, error)
+#define READ_MSG_DATA_CB_ERR(dev, udata, error) \
+  (udata)->callback (dev, \
+                     READ_MSG_CMD, 0, 0, NULL, 0, (udata)->user_data, error)
 
 static void
 busy_ack_sent_cb (FpiUsbTransfer *transfer, FpDevice *device,
@@ -307,6 +308,14 @@ __handle_incoming_msg (FpDevice             *device,
         fp_dbg ("non-zero bytes in cmd response");
 
       innerlen = innerbuf[1] | (innerbuf[2] << 8);
+      if (innerlen < 3 || innerlen > len - 3)
+        {
+          fp_warn ("cmd response has invalid inner length (%d)", innerlen);
+          error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                            "CMD response has invalid inner length");
+          goto err;
+        }
+
       innerlen = innerlen - 3;
       _subcmd = innerbuf[5];
       fp_dbg ("device responds to subcmd %x with %d bytes", _subcmd, innerlen);
@@ -1243,7 +1252,7 @@ do_verify_stop (FpDevice *dev, FpiMatchResult res, GError *error)
   FpiSsm *ssm = deinitsm_new (dev, data);
 
   /* Report the error immediately if possible, otherwise delay it. */
-  if (error && error->domain == FP_DEVICE_RETRY)
+  if (!error || error->domain == FP_DEVICE_RETRY)
     fpi_device_verify_report (dev, res, NULL, error);
   else
     data->error = error;
@@ -1295,7 +1304,7 @@ verify_start_sm_run_state (FpiSsm *ssm, FpDevice *dev)
       memcpy (msg, verify_hdr, sizeof (verify_hdr));
       memcpy (msg + sizeof (verify_hdr), data, data_len);
 
-      transfer = alloc_send_cmd28_transfer (dev, 0x03, data, data_len);
+      transfer = alloc_send_cmd28_transfer (dev, 0x03, msg, msg_len);
 
       g_free (msg);
 
@@ -1341,7 +1350,6 @@ v_handle_resp00 (FpDevice *dev, unsigned char *data,
       fp_dbg ("good image");
       break;
 
-    case 0x1c:     /* FIXME what does this one mean? */
     case 0x0b:     /* FIXME what does this one mean? */
     case 0x23:     /* FIXME what does this one mean? */
       error = fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL);
@@ -1349,6 +1357,14 @@ v_handle_resp00 (FpDevice *dev, unsigned char *data,
 
     case 0x0f:     /* scan taking too long, remove finger and try again */
       error = fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER);
+      break;
+
+    case 0x1c:     /* swipe too fast */
+      error = fpi_device_retry_new (FP_DEVICE_RETRY_TOO_FAST);
+      break;
+
+    case 0x1d:     /* too much horizontal movement */
+      error = fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER);
       break;
 
     case 0x1e:     /* swipe too short */
@@ -1439,7 +1455,7 @@ verify_rd2800_cb (FpDevice *dev, enum read_msg_type msgtype,
       do_verify_stop (dev,
                       FPI_MATCH_ERROR,
                       fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
-                                                "Response hat wrong command sequence"));
+                                                "Response had wrong command sequence"));
       return;
     }
 

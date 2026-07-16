@@ -213,9 +213,8 @@ sum_histogram_values (unsigned char *data, guint8 threshold)
   if (threshold > 0x0f)
     return -1;
 
-  /* FIXME endianness */
   for (i = threshold; i < 16; i++)
-    r += histogram[i];
+    r += GUINT16_FROM_LE (histogram[i]);
 
   return r;
 }
@@ -823,7 +822,7 @@ complete_deactivation (FpImageDevice *dev)
    * maybe we can do this with a master reset, unconditionally? */
 
   self->deactivating = FALSE;
-  g_slist_free (self->strips);
+  g_slist_free_full (self->strips, g_free);
   self->strips = NULL;
   self->strips_len = 0;
   fpi_image_device_deactivate_complete (dev, NULL);

@@ -66,6 +66,31 @@ fpi_byte_reader_new (const guint8 * data, guint size)
 }
 
 /**
+ * fpi_byte_reader_new_bytes: (skip)
+ * @bytes: (in) (transfer none): a #GBytes instance from which the
+ *     #FpiByteReader should read
+ *
+ * Create a new #FpiByteReader instance, which will read from @bytes.
+ *
+ * Free-function: fpi_byte_reader_free
+ *
+ * Returns: (transfer full): a new #FpiByteReader instance
+ */
+FpiByteReader *
+fpi_byte_reader_new_bytes (GBytes * bytes)
+{
+  const guint8 *data;
+  gsize size = 0;
+
+  g_return_val_if_fail (bytes != NULL, NULL);
+
+  data = g_bytes_get_data (bytes, &size);
+  g_return_val_if_fail (size <= G_MAXUINT, NULL);
+
+  return fpi_byte_reader_new (data, (guint) size);
+}
+
+/**
  * fpi_byte_reader_free:
  * @reader: (in) (transfer full): a #FpiByteReader instance
  *
@@ -98,6 +123,30 @@ fpi_byte_reader_init (FpiByteReader * reader, const guint8 * data, guint size)
   reader->data = data;
   reader->size = size;
   reader->byte = 0;
+}
+
+/**
+ * fpi_byte_reader_init_bytes:
+ * @reader: a #FpiByteReader instance
+ * @bytes: (in) (transfer none): a #GBytes instance from which
+ *     the #FpiByteReader should read
+ *
+ * Initializes a #FpiByteReader instance to read from @bytes. This function
+ * can be called on already initialized instances.
+ */
+FpiByteReader *
+fpi_byte_reader_init_bytes (FpiByteReader * reader, GBytes * bytes)
+{
+  g_return_val_if_fail (reader != NULL, NULL);
+  g_return_val_if_fail (bytes != NULL, NULL);
+
+  gsize size = 0;
+  const guint8 *data = g_bytes_get_data (bytes, &size);
+
+  g_return_val_if_fail (size <= G_MAXUINT, NULL);
+  fpi_byte_reader_init (reader, data, (guint) size);
+
+  return reader;
 }
 
 /**
@@ -797,6 +846,41 @@ fpi_byte_reader_peek_data (const FpiByteReader * reader, guint size,
     const guint8 ** val)
 {
   return fpi_byte_reader_peek_data_inline (reader, size, val);
+}
+
+/**
+ * fpi_byte_reader_get_data_fixed:
+ * @reader: a #FpiByteReader instance
+ * @size: Size in bytes
+ * @val: (out) (array length=size): address of a buffer to copy data into
+ *
+ * Copies @size bytes from the current data position into @val if at
+ * least @size bytes are left, and updates the current position.
+ *
+ * Returns: %TRUE if successful, %FALSE otherwise.
+ */
+gboolean
+(fpi_byte_reader_get_data_static) (FpiByteReader * reader, guint size,
+    const guint8 * val)
+{
+  return (fpi_byte_reader_get_data_inline_static) (reader, size, val);
+}
+
+/**
+ * fpi_byte_reader_peek_data_fixed:
+ * @reader: a #FpiByteReader instance
+ * @size: Size in bytes
+ * @val: (out) (array length=size): address of a buffer to copy data into
+ *
+ * Like fpi_byte_reader_get_data_fixed() but does not advance the position.
+ *
+ * Returns: %TRUE if successful, %FALSE otherwise.
+ */
+gboolean
+(fpi_byte_reader_peek_data_static) (const FpiByteReader * reader, guint size,
+    guint8 * val)
+{
+  return (fpi_byte_reader_peek_data_inline_static) (reader, size, val);
 }
 
 /**

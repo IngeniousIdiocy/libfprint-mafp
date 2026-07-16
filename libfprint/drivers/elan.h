@@ -31,6 +31,7 @@
 #define ELAN_0907 (1 << 0)
 #define ELAN_0C03 (1 << 1)
 #define ELAN_0C42 (1 << 2)
+#define ELAN_0C58 (1 << 3)
 
 /* devices which don't require frame rotation before assembling */
 #define ELAN_NOT_ROTATED ELAN_0C03
@@ -44,7 +45,9 @@
 
 /* times to retry reading calibration status during one session
  * generally prevents calibration from looping indefinitely */
-#define ELAN_CALIBRATION_ATTEMPTS 10
+#define ELAN_DEFAULT_CALIBRATION_ATTEMPTS 10
+#define ELAN_CALIBRATION_ATTEMPTS(dev_type) \
+  ((dev_type) == ELAN_0C58 ? 30 : ELAN_DEFAULT_CALIBRATION_ATTEMPTS)
 
 /* min and max frames in a capture */
 #define ELAN_MIN_FRAMES 7
@@ -220,7 +223,7 @@ static const FpIdEntry elan_id_table[] = {
   {.vid = ELAN_VEND_ID,  .pid = 0x0c4f, .driver_data = ELAN_ALL_DEV},
   {.vid = ELAN_VEND_ID,  .pid = 0x0c63, .driver_data = ELAN_ALL_DEV},
   {.vid = ELAN_VEND_ID,  .pid = 0x0c6e, .driver_data = ELAN_ALL_DEV},
-  {.vid = ELAN_VEND_ID,  .pid = 0x0c58, .driver_data = ELAN_ALL_DEV},
+  {.vid = ELAN_VEND_ID,  .pid = 0x0c58, .driver_data = ELAN_0C58},
   {.vid = 0,  .pid = 0,  .driver_data = 0},
 };
 

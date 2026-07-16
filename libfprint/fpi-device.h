@@ -38,6 +38,13 @@ typedef enum {
 
 /**
  * FpIdEntry:
+ * @pid: The USB product ID (for USB devices)
+ * @vid: The USB vendor ID (for USB devices)
+ * @virtual_envvar: Environment variable name (for virtual devices)
+ * @driver_data: Optional driver-specific data, defaults to 0
+ * @udev_types: Subtypes for udev-based devices
+ * @spi_acpi_id: ACPI ID (for SPI devices)
+ * @hid_id: HID device identifier (for HID devices)
  *
  * An entry in the table of supported hardware. For USB devices, the product ID
  * and vendor ID should be provided. The optional @driver_data field defaults
@@ -100,7 +107,8 @@ struct _FpIdEntry
  *   guaranteed to only happen when the device is open (this includes delete).
  * @close: Close the device again
  * @enroll: Start an enroll operation
- * @verify: Start a verify operation
+ * @verify: Start a verify operation (it will be implemented via @identify
+ *   if not overriden).
  * @identify: Start an identify operation
  * @capture: Start a capture operation
  * @list: List prints stored on the device
@@ -221,7 +229,6 @@ GUsbDevice  *fpi_device_get_usb_device (FpDevice *device);
 const gchar *fpi_device_get_virtual_env (FpDevice *device);
 gpointer     fpi_device_get_udev_data (FpDevice                 *device,
                                        FpiDeviceUdevSubtypeFlags subtype);
-//const gchar *fpi_device_get_spi_dev (FpDevice *device);
 
 
 FpiDeviceAction fpi_device_get_current_action (FpDevice *device);
@@ -324,5 +331,12 @@ gboolean fpi_device_report_finger_status (FpDevice           *device,
 gboolean fpi_device_report_finger_status_changes (FpDevice           *device,
                                                   FpFingerStatusFlags added_status,
                                                   FpFingerStatusFlags removed_status);
+
+/* Debugging utilities */
+
+#define fpi_device_emulation_mode_enabled(dev) \
+  G_UNLIKELY ((fpi_device_emulation_mode_enabled) ((dev)))
+
+gboolean (fpi_device_emulation_mode_enabled) (FpDevice *device);
 
 G_END_DECLS

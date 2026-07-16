@@ -18,6 +18,7 @@
  */
 
 #include "fpi-spi-transfer.h"
+#include "fpi-log.h"
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
 #include <errno.h>
@@ -41,7 +42,7 @@ static gsize block_size = 0;
  * Drivers should always use this API rather than calling read/write/ioctl on
  * the spidev device.
  *
- * Setting G_MESSAGES_DEBUG and FP_DEBUG_TRANSFER will result in the message
+ * Setting %G_MESSAGES_DEBUG and %FP_DEBUG_TRANSFER will result in the message
  * content to be dumped.
  */
 
@@ -49,30 +50,9 @@ static gsize block_size = 0;
 G_DEFINE_BOXED_TYPE (FpiSpiTransfer, fpi_spi_transfer, fpi_spi_transfer_ref, fpi_spi_transfer_unref)
 
 static void
-dump_buffer (guchar *buf, gssize dump_len)
-{
-  g_autoptr(GString) line = NULL;
-
-  line = g_string_new ("");
-  /* Dump the buffer. */
-  for (gssize i = 0; i < dump_len; i++)
-    {
-      g_string_append_printf (line, "%02x ", buf[i]);
-      if ((i + 1) % 16 == 0)
-        {
-          g_debug ("%s", line->str);
-          g_string_set_size (line, 0);
-        }
-    }
-
-  if (line->len)
-    g_debug ("%s", line->str);
-}
-
-static void
 log_transfer (FpiSpiTransfer *transfer, gboolean submit, GError *error)
 {
-  if (g_getenv ("FP_DEBUG_TRANSFER"))
+  if (fpi_log_is_debug_transfer_enabled ())
     {
       if (submit)
         {
@@ -82,7 +62,7 @@ log_transfer (FpiSpiTransfer *transfer, gboolean submit, GError *error)
                    transfer->length_rd);
 
           if (transfer->buffer_wr)
-            dump_buffer (transfer->buffer_wr, transfer->length_wr);
+            fp_dbg_hex_dump_data (transfer->buffer_wr, transfer->length_wr);
         }
       else
         {
@@ -98,7 +78,7 @@ log_transfer (FpiSpiTransfer *transfer, gboolean submit, GError *error)
                    transfer->length_wr,
                    transfer->length_rd);
           if (transfer->buffer_rd)
-            dump_buffer (transfer->buffer_rd, transfer->length_rd);
+            fp_dbg_hex_dump_data (transfer->buffer_rd, transfer->length_rd);
         }
     }
 }

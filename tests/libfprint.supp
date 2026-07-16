@@ -24,3 +24,12 @@
    ...
    fun:g_thread_new
 }
+
+{
+   <ignore-libusb-context>
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   ...
+   fun:libusb_init_context
+}

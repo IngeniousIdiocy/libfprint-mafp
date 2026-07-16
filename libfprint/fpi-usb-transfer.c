@@ -18,6 +18,7 @@
  */
 
 #include "fpi-usb-transfer.h"
+#include "fpi-log.h"
 
 /**
  * SECTION:fpi-usb-transfer
@@ -30,6 +31,9 @@
  *
  * Drivers should use this API only rather than accessing the GUsbDevice
  * directly in most cases.
+ *
+ * Setting %G_MESSAGES_DEBUG and %FP_DEBUG_TRANSFER will result in the message
+ * content to be dumped.
  */
 
 
@@ -38,7 +42,7 @@ G_DEFINE_BOXED_TYPE (FpiUsbTransfer, fpi_usb_transfer, fpi_usb_transfer_ref, fpi
 static void
 log_transfer (FpiUsbTransfer *transfer, gboolean submit, GError *error)
 {
-  if (g_getenv ("FP_DEBUG_TRANSFER"))
+  if (fpi_log_is_debug_transfer_enabled ())
     {
       if (!submit)
         {
@@ -65,25 +69,9 @@ log_transfer (FpiUsbTransfer *transfer, gboolean submit, GError *error)
 
       if (!submit == !!(transfer->endpoint & FPI_USB_ENDPOINT_IN))
         {
-          g_autoptr(GString) line = NULL;
-          gssize dump_len;
-
-          dump_len = (transfer->endpoint & FPI_USB_ENDPOINT_IN) ? transfer->actual_length : transfer->length;
-
-          line = g_string_new ("");
-          /* Dump the buffer. */
-          for (gint i = 0; i < dump_len; i++)
-            {
-              g_string_append_printf (line, "%02x ", transfer->buffer[i]);
-              if ((i + 1) % 16 == 0)
-                {
-                  g_debug ("%s", line->str);
-                  g_string_set_size (line, 0);
-                }
-            }
-
-          if (line->len)
-            g_debug ("%s", line->str);
+          fp_dbg_hex_dump_data (transfer->buffer,
+                                (transfer->endpoint & FPI_USB_ENDPOINT_IN) ?
+                                transfer->actual_length : transfer->length);
         }
     }
 }
@@ -344,7 +332,8 @@ transfer_finish_cb (GObject *source_object, GAsyncResult *res, gpointer user_dat
     {
       error = g_error_new (G_USB_DEVICE_ERROR,
                            G_USB_DEVICE_ERROR_IO,
-                           "Unexpected short error of %zd size (expected %zd)", transfer->actual_length, transfer->length);
+                           "Unexpected short error of %zd size (expected %zd)",
+                           transfer->actual_length, transfer->length);
     }
 
   callback = transfer->callback;
@@ -547,4 +536,24 @@ fpi_usb_transfer_submit_sync (FpiUsbTransfer *transfer,
     transfer->actual_length = actual_length;
 
   return res;
+}
+
+/**
+ * fpi_usb_transfer_set_short_error:
+ * @transfer: The transfer to submit, must have been filled.
+ * @short_is_error: Whether a short transfer should be considered an error
+ *
+ * Sets whether a short transfer (a transfer in which the transferred length
+ * does not match the expected length) should be considered an error
+ *
+ * By default, short transfers are not considered an error, but
+ * drivers can enforce a further check by setting this flag.
+ */
+void
+fpi_usb_transfer_set_short_error (FpiUsbTransfer *transfer,
+                                  gboolean        short_is_error)
+{
+  g_return_if_fail (transfer);
+
+  transfer->short_is_error = short_is_error;
 }

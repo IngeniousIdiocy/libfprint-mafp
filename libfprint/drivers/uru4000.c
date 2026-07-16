@@ -20,8 +20,8 @@
 
 #define FP_COMPONENT "uru4000"
 
-#include <nss.h>
-#include <pk11pub.h>
+#include <openssl/evp.h>
+#include <openssl/err.h>
 
 #include "drivers_api.h"
 
@@ -148,10 +148,7 @@ struct _FpiDeviceUru4000
   int                             fwfixer_offset;
   unsigned char                   fwfixer_value;
 
-  CK_MECHANISM_TYPE               cipher;
-  PK11SlotInfo                   *slot;
-  PK11SymKey                     *symkey;
-  SECItem                        *param;
+  EVP_CIPHER_CTX                 *cipher_ctx;
 };
 G_DECLARE_FINAL_TYPE (FpiDeviceUru4000, fpi_device_uru4000, FPI, DEVICE_URU4000,
                       FpImageDevice);
@@ -246,13 +243,29 @@ response_cb (FpiUsbTransfer *transfer, FpDevice *dev, void *user_data, GError *e
     fpi_ssm_mark_failed (ssm, error);
 }
 
+static GError *
+openssl_device_error (void)
+{
+  char buf[256];
+  unsigned long e;
+
+  e = ERR_get_error ();
+  if (e == 0)
+    return fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                     "unexpected OpenSSL error");
+
+  ERR_error_string_n (e, buf, G_N_ELEMENTS (buf));
+
+  return fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "OpenSSL error: %s",
+                                   buf);
+}
+
 static void
 challenge_cb (FpiUsbTransfer *transfer, FpDevice *dev, void *user_data, GError *error)
 {
   FpiSsm *ssm = user_data;
   FpiDeviceUru4000 *self = FPI_DEVICE_URU4000 (dev);
-  unsigned char respdata[CR_LENGTH];
-  PK11Context *ctx;
+  unsigned char respdata[CR_LENGTH * 2];
   int outlen;
 
   if (error)
@@ -261,17 +274,39 @@ challenge_cb (FpiUsbTransfer *transfer, FpDevice *dev, void *user_data, GError *
       return;
     }
 
+  if (transfer->actual_length != CR_LENGTH)
+    {
+      error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                        "Unexpected buffer length (%" G_GSIZE_FORMAT
+                                        "instead of %d)",
+                                        transfer->actual_length, CR_LENGTH);
+      fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+      return;
+    }
+
   /* submit response */
   /* produce response from challenge */
-  ctx = PK11_CreateContextBySymKey (self->cipher, CKA_ENCRYPT,
-                                    self->symkey, self->param);
-  if (PK11_CipherOp (ctx, respdata, &outlen, CR_LENGTH, transfer->buffer, CR_LENGTH) != SECSuccess ||
-      PK11_Finalize (ctx) != SECSuccess)
+  if (!EVP_EncryptUpdate (self->cipher_ctx, respdata, &outlen, transfer->buffer, CR_LENGTH))
     {
-      fp_err ("Failed to encrypt challenge data");
-      error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Failed to encrypt challenge data");
+      fpi_ssm_mark_failed (ssm, openssl_device_error ());
+      return;
     }
-  PK11_DestroyContext (ctx, PR_TRUE);
+
+  if (outlen != CR_LENGTH)
+    {
+      error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                        "Unexpected encrypted buffer length (%d"
+                                        "instead of %d)",
+                                        outlen, CR_LENGTH);
+      fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+      return;
+    }
+
+  if (!EVP_EncryptFinal_ex (self->cipher_ctx, respdata + outlen, &outlen))
+    {
+      fpi_ssm_mark_failed (ssm, openssl_device_error ());
+      return;
+    }
 
   if (!error)
     write_regs (FP_IMAGE_DEVICE (dev), REG_RESPONSE, CR_LENGTH, respdata, response_cb, ssm);
@@ -552,7 +587,10 @@ image_transfer_cb (FpiUsbTransfer *transfer, FpDevice *dev,
     }
   else
     {
-      self->img_data = g_memdup2 (transfer->buffer, sizeof (struct uru4k_image));
+      struct uru4k_image *img = g_memdup2 (transfer->buffer, sizeof (struct uru4k_image));
+
+      img->num_lines = GUINT16_FROM_LE (img->num_lines);
+      self->img_data = g_steal_pointer (&img);
       self->img_data_actual_length = transfer->actual_length;
       fpi_ssm_next_state (ssm);
     }
@@ -643,10 +681,10 @@ calc_dev2 (struct uru4k_image *img)
 static void
 imaging_run_state (FpiSsm *ssm, FpDevice *_dev)
 {
+  g_autoptr(FpImage) fpimg = NULL;
   FpImageDevice *dev = FP_IMAGE_DEVICE (_dev);
   FpiDeviceUru4000 *self = FPI_DEVICE_URU4000 (_dev);
   struct uru4k_image *img = self->img_data;
-  FpImage *fpimg;
   uint32_t key;
   uint8_t flags, num_lines;
   int i, r, to, dev2;
@@ -703,9 +741,9 @@ imaging_run_state (FpiSsm *ssm, FpDevice *_dev)
 
     case IMAGING_DECODE:
       key  = self->last_reg_rd[0];
-      key |= self->last_reg_rd[1] << 8;
-      key |= self->last_reg_rd[2] << 16;
-      key |= self->last_reg_rd[3] << 24;
+      key |= (uint32_t) self->last_reg_rd[1] << 8;
+      key |= (uint32_t) self->last_reg_rd[2] << 16;
+      key |= (uint32_t) self->last_reg_rd[3] << 24;
       key ^= self->img_enc_seed;
 
       fp_dbg ("encryption id %02x -> key %08x", img->key_number, key);
@@ -716,6 +754,17 @@ imaging_run_state (FpiSsm *ssm, FpDevice *_dev)
           num_lines = img->block_info[self->img_block].num_lines;
           if (num_lines == 0)
             break;
+
+          /* num_lines is device-supplied; make sure decoding this block stays
+           * within the captured image buffer (IMAGE_HEIGHT rows). */
+          if ((size_t) self->img_lines_done + num_lines > IMAGE_HEIGHT)
+            {
+              fp_err ("bad captured image: block %d (%d lines) overflows buffer",
+                      self->img_block, num_lines);
+              fpi_ssm_mark_failed (ssm,
+                                   fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+              return;
+            }
 
           fp_dbg ("%d %02x %d", self->img_block, flags,
                   num_lines);
@@ -760,6 +809,17 @@ imaging_run_state (FpiSsm *ssm, FpDevice *_dev)
           num_lines = img->block_info[i].num_lines;
           if (num_lines == 0)
             break;
+
+          if ((size_t) r + num_lines > IMAGE_HEIGHT ||
+              (size_t) to + (size_t) num_lines * IMAGE_WIDTH > fpimg->width * fpimg->height)
+            {
+              fp_err ("bad captured image: block %d (%d lines) overflows buffer",
+                      i, num_lines);
+              fpi_ssm_mark_failed (ssm,
+                                   fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+              return;
+            }
+
           memcpy (&fpimg->data[to], &img->data[r][0],
                   num_lines * IMAGE_WIDTH);
           if (!(flags & BLOCKF_NOT_PRESENT))
@@ -776,7 +836,8 @@ imaging_run_state (FpiSsm *ssm, FpDevice *_dev)
        */
       if (self->profile->image_not_flipped)
         fpimg->flags |= FPI_IMAGE_V_FLIPPED | FPI_IMAGE_H_FLIPPED;
-      fpi_image_device_image_captured (dev, fpimg);
+
+      fpi_image_device_image_captured (dev, g_steal_pointer (&fpimg));
 
       if (self->activate_state == FPI_IMAGE_DEVICE_STATE_CAPTURE)
         fpi_ssm_jump_to_state (ssm, IMAGING_CAPTURE);
@@ -1146,6 +1207,12 @@ init_run_state (FpiSsm *ssm, FpDevice *_dev)
 static void
 activate_initsm_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
+  FpiDeviceUru4000 *self = FPI_DEVICE_URU4000 (dev);
+
+  g_clear_pointer (&self->scanpwr_irq_timeout, g_source_destroy);
+  self->irq_cb_data = NULL;
+  self->irq_cb = NULL;
+
   fpi_image_device_activate_complete (FP_IMAGE_DEVICE (dev), error);
 }
 
@@ -1270,8 +1337,6 @@ dev_init (FpImageDevice *dev)
   g_autoptr(GPtrArray) interfaces = NULL;
   GUsbInterface *iface = NULL;
   guint64 driver_data;
-  SECStatus rv;
-  SECItem item;
   int i;
 
   interfaces = g_usb_device_get_interfaces (fpi_device_get_usb_device (FP_DEVICE (dev)), &error);
@@ -1343,25 +1408,11 @@ dev_init (FpImageDevice *dev)
       return;
     }
 
-  /* Disable loading p11-kit's user configuration */
-  g_setenv ("P11_KIT_NO_USER_CONFIG", "1", TRUE);
-
-  /* Initialise NSS early */
-  rv = NSS_NoDB_Init (".");
-  if (rv != SECSuccess)
-    {
-      fp_err ("could not initialise NSS");
-      fpi_image_device_open_complete (dev,
-                                      fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
-                                                                "Could not initialise NSS"));
-      return;
-    }
-
   self = FPI_DEVICE_URU4000 (dev);
 
   g_clear_pointer (&self->rand, g_rand_free);
   self->rand = g_rand_new ();
-  if (g_strcmp0 (g_getenv ("FP_DEVICE_EMULATION"), "1") == 0)
+  if (fpi_device_emulation_mode_enabled (FP_DEVICE (dev)))
     g_rand_set_seed (self->rand, 0xFACADE);
 
   driver_data = fpi_device_get_driver_data (FP_DEVICE (dev));
@@ -1369,35 +1420,17 @@ dev_init (FpImageDevice *dev)
   self->interface = g_usb_interface_get_number (iface);
 
   /* Set up encryption */
-  self->cipher = CKM_AES_ECB;
-  self->slot = PK11_GetBestSlot (self->cipher, NULL);
-  if (self->slot == NULL)
+  if (!(self->cipher_ctx = EVP_CIPHER_CTX_new ()))
     {
-      fp_err ("could not get encryption slot");
-      fpi_image_device_open_complete (dev,
-                                      fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
-                                                                "Could not get encryption slot"));
+      fpi_image_device_open_complete (dev, openssl_device_error ());
       return;
     }
-  item.type = siBuffer;
-  item.data = (unsigned char *) crkey;
-  item.len = sizeof (crkey);
-  self->symkey = PK11_ImportSymKey (self->slot,
-                                    self->cipher,
-                                    PK11_OriginUnwrap,
-                                    CKA_ENCRYPT,
-                                    &item, NULL);
-  if (self->symkey == NULL)
+
+  if (!EVP_EncryptInit_ex (self->cipher_ctx, EVP_aes_128_ecb (), NULL, crkey, NULL))
     {
-      fp_err ("failed to import key into NSS");
-      PK11_FreeSlot (self->slot);
-      self->slot = NULL;
-      fpi_image_device_open_complete (dev,
-                                      fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
-                                                                "Failed to import key into NSS"));
+      fpi_image_device_open_complete (dev, openssl_device_error ());
       return;
     }
-  self->param = PK11_ParamFromIV (self->cipher, NULL);
 
   fpi_image_device_open_complete (dev, NULL);
 }
@@ -1408,14 +1441,7 @@ dev_deinit (FpImageDevice *dev)
   GError *error = NULL;
   FpiDeviceUru4000 *self = FPI_DEVICE_URU4000 (dev);
 
-  if (self->symkey)
-    PK11_FreeSymKey (self->symkey);
-  if (self->param)
-    SECITEM_FreeItem (self->param, PR_TRUE);
-  if (self->slot)
-    PK11_FreeSlot (self->slot);
-
-  NSS_Shutdown ();
+  g_clear_pointer (&self->cipher_ctx, EVP_CIPHER_CTX_free);
 
   g_usb_device_release_interface (fpi_device_get_usb_device (FP_DEVICE (dev)),
                                   self->interface, 0, &error);

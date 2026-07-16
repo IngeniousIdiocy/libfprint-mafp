@@ -384,6 +384,15 @@ capture_read_stripe_data_cb (FpiUsbTransfer *transfer,
 
       payload_length = priv->stripe_packet->data[AESX660_RESPONSE_SIZE_LSB_OFFSET] +
                        (priv->stripe_packet->data[AESX660_RESPONSE_SIZE_MSB_OFFSET] << 8);
+
+      if (payload_length > AESX660_BULK_TRANSFER_SIZE)
+        {
+          fp_dbg ("Oversized payload length %" G_GSSIZE_FORMAT ", discarding",
+                  payload_length);
+          g_byte_array_set_size (priv->stripe_packet, 0);
+          break;
+        }
+
       fp_dbg ("Got frame, type %.2x payload of size %.4lx",
               priv->stripe_packet->data[AESX660_RESPONSE_TYPE_OFFSET],
               (long) payload_length);
@@ -722,7 +731,7 @@ complete_deactivation (FpImageDevice *dev)
   G_DEBUG_HERE ();
 
   priv->deactivating = FALSE;
-  g_slist_free (priv->strips);
+  g_slist_free_full (priv->strips, g_free);
   priv->strips = NULL;
   priv->strips_len = 0;
   fpi_image_device_deactivate_complete (dev, NULL);

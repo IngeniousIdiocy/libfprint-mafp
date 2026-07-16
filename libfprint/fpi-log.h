@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2007-2008 Daniel Drake <dsd@gentoo.org>
  * Copyright (C) 2018 Bastien Nocera <hadess@hadess.net>
+ * Copyright (C) 2026 Marco Trevisan (Treviño) <mail@3v1n0.net>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -79,13 +80,16 @@
  *
  * Uses fp_err() to print an error if the @condition is true.
  */
-#define BUG_ON(condition) G_STMT_START          \
-        if (condition) {                        \
-            char *s;                        \
-            s = g_strconcat ("BUG: (", #condition, ")", NULL); \
-            fp_err ("%s: %s() %s:%d", s, G_STRFUNC, __FILE__, __LINE__); \
-            g_free (s);                     \
-          } G_STMT_END
+#define BUG_ON(condition) \
+  G_STMT_START          \
+  if (condition) \
+    {                        \
+      char *s;                        \
+      s = g_strconcat ("BUG: (", #condition, ")", NULL); \
+      fp_err ("%s: %s() %s:%d", s, G_STRFUNC, __FILE__, __LINE__); \
+      g_free (s);                     \
+    } \
+  G_STMT_END
 
 /**
  * BUG:
@@ -93,3 +97,32 @@
  * Same as BUG_ON() but is always true.
  */
 #define BUG() BUG_ON (1)
+
+void (fpi_dbg_hex_dump_data) (const gchar  *log_domain,
+                              const guint8 *buf,
+                              gsize len);
+
+/**
+ * fp_dbg_hex_dump_data:
+ * @buf: Bytes buffer to dump
+ * @len: Length of @buf to dump
+ *
+ * Prints hex dump of @buf to fp_dbg()
+ */
+#define fp_dbg_hex_dump_data(buf, len) \
+  (fpi_dbg_hex_dump_data) (G_LOG_DOMAIN, (buf), (len))
+
+void (fpi_dbg_hex_dump_bytes) (const gchar *log_domain,
+                               GBytes      *bytes);
+
+/**
+ * fp_dbg_hex_dump_bytes:
+ * @bytes: #GBytes to dump
+ *
+ * Prints hex dump of @bytes to fp_dbg()
+ */
+#define fp_dbg_hex_dump_bytes(bytes) \
+  (fpi_dbg_hex_dump_bytes) \
+  (G_LOG_DOMAIN, (bytes))
+
+gboolean fpi_log_is_debug_transfer_enabled (void);

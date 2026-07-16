@@ -19,6 +19,7 @@
 
 
 
+#include "glib.h"
 #define FP_COMPONENT "goodixmoc"
 
 #include "drivers_api.h"
@@ -128,11 +129,13 @@ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
                    GError         *error)
 {
   FpiDeviceGoodixMoc *self = FPI_DEVICE_GOODIXMOC (device);
+  FpiByteReader reader = {0};
   CommandData *data = user_data;
-  int ret = -1, ssm_state = 0;
+  int ssm_state = 0;
   gxfp_cmd_response_t cmd_reponse = {0, };
   pack_header header;
   guint32 crc32_calc = 0;
+  guint32 crc32 = 0;
   guint16 cmd = 0;
 
   if (error)
@@ -154,8 +157,9 @@ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
       return;
     }
 
-  ret = gx_proto_parse_header (transfer->buffer, transfer->actual_length, &header);
-  if (ret != 0)
+  fpi_byte_reader_init (&reader, transfer->buffer, transfer->actual_length);
+
+  if (gx_proto_parse_header (&reader, &header) != 0)
     {
       fpi_ssm_mark_failed (transfer->ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -163,8 +167,25 @@ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
       return;
     }
 
-  gx_proto_crc32_calc (transfer->buffer, PACKAGE_HEADER_SIZE + header.len, (uint8_t *) &crc32_calc);
-  if(crc32_calc != GUINT32_FROM_LE (*(uint32_t *) (transfer->buffer + PACKAGE_HEADER_SIZE + header.len)))
+  if (header.len < PACKAGE_CRC_SIZE ||
+      !fpi_byte_reader_set_pos (&reader, PACKAGE_HEADER_SIZE + header.len - PACKAGE_CRC_SIZE))
+    {
+      fpi_ssm_mark_failed (transfer->ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                     "Package crc read failed"));
+      return;
+    }
+
+  /* Exclude the CRC from the package length */
+  header.len -= PACKAGE_CRC_SIZE;
+
+  /* The reader is positioned right at the CRC, i.e. at the end of the data the
+   * CRC is computed over, so use its position as the length. */
+  gx_proto_crc32_calc (transfer->buffer, fpi_byte_reader_get_pos (&reader),
+                       (uint8_t *) &crc32_calc);
+
+  if (!fpi_byte_reader_get_uint32_le (&reader, &crc32) ||
+      GUINT32_FROM_LE (crc32_calc) != crc32)
     {
       fpi_ssm_mark_failed (transfer->ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -174,8 +195,9 @@ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
 
   cmd = MAKE_CMD_EX (header.cmd0, header.cmd1);
 
-  ret = gx_proto_parse_body (cmd, &transfer->buffer[PACKAGE_HEADER_SIZE], header.len, &cmd_reponse);
-  if (ret != 0)
+  fpi_byte_reader_init (&reader, &transfer->buffer[PACKAGE_HEADER_SIZE], header.len);
+
+  if (gx_proto_parse_body (cmd, &reader, &cmd_reponse) != 0)
     {
       fpi_ssm_mark_failed (transfer->ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -222,7 +244,7 @@ fp_cmd_run_state (FpiSsm   *ssm,
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
-    case FP_CMD_SEND:
+    case GOODIX_CMD_SEND:
       if (self->cmd_transfer)
         {
           self->cmd_transfer->ssm = ssm;
@@ -238,7 +260,7 @@ fp_cmd_run_state (FpiSsm   *ssm,
         }
       break;
 
-    case FP_CMD_GET_ACK:
+    case GOODIX_CMD_GET_ACK:
       transfer = fpi_usb_transfer_new (dev);
       transfer->ssm = ssm;
       fpi_usb_transfer_fill_bulk (transfer, EP_IN, EP_IN_MAX_BUF_SIZE);
@@ -250,7 +272,7 @@ fp_cmd_run_state (FpiSsm   *ssm,
 
       break;
 
-    case FP_CMD_GET_DATA:
+    case GOODIX_CMD_GET_DATA:
       transfer = fpi_usb_transfer_new (dev);
       transfer->ssm = ssm;
       fpi_usb_transfer_fill_bulk (transfer, EP_IN, EP_IN_MAX_BUF_SIZE);
@@ -338,7 +360,7 @@ goodix_sensor_cmd (FpiDeviceGoodixMoc *self,
 
   self->cmd_ssm = fpi_ssm_new (FP_DEVICE (self),
                                fp_cmd_run_state,
-                               FP_CMD_NUM_STATES);
+                               GOODIX_CMD_NUM_STATES);
 
   fpi_ssm_set_data (self->cmd_ssm, data, (GDestroyNotify) fp_cmd_ssm_done_data_free);
 
@@ -377,13 +399,13 @@ fp_pwr_btn_shield_cb (FpiDeviceGoodixMoc  *self,
 }
 /******************************************************************************
  *
- *  fp_verify_xxxx Function
+ *  fp_identify_xxxx Function
  *
  *****************************************************************************/
 static void
-fp_verify_capture_cb (FpiDeviceGoodixMoc  *self,
-                      gxfp_cmd_response_t *resp,
-                      GError              *error)
+fp_identify_capture_cb (FpiDeviceGoodixMoc  *self,
+                        gxfp_cmd_response_t *resp,
+                        GError              *error)
 {
   if (error)
     {
@@ -416,9 +438,9 @@ fp_verify_capture_cb (FpiDeviceGoodixMoc  *self,
 }
 
 static void
-fp_verify_cb (FpiDeviceGoodixMoc  *self,
-              gxfp_cmd_response_t *resp,
-              GError              *error)
+fp_identify_cb (FpiDeviceGoodixMoc  *self,
+                gxfp_cmd_response_t *resp,
+                GError              *error)
 {
   FpDevice *device = FP_DEVICE (self);
   FpPrint *new_scan = NULL;
@@ -429,43 +451,57 @@ fp_verify_cb (FpiDeviceGoodixMoc  *self,
       fpi_ssm_mark_failed (self->task_ssm, error);
       return;
     }
+
   if (resp->verify.match)
     {
+      GPtrArray *templates = NULL;
+      guint matching_index;
+
+      fpi_device_get_identify_data (device, &templates);
       new_scan = fp_print_from_template (self, &resp->verify.template);
 
-      if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_VERIFY)
-        {
-          fpi_device_get_verify_data (device, &matching);
-          if (!fp_print_equal (matching, new_scan))
-            matching = NULL;
-        }
-      else
-        {
-          GPtrArray *templates = NULL;
-          fpi_device_get_identify_data (device, &templates);
-
-          for (gint i = 0; i < templates->len; i++)
-            {
-              if (fp_print_equal (g_ptr_array_index (templates, i), new_scan))
-                {
-                  matching = g_ptr_array_index (templates, i);
-                  break;
-                }
-            }
-        }
+      if (g_ptr_array_find_with_equal_func (templates, new_scan,
+                                            (GEqualFunc) fp_print_equal,
+                                            &matching_index))
+        matching = g_ptr_array_index (templates, matching_index);
     }
 
-  if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_VERIFY)
-    fpi_device_verify_report (device, matching ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL, new_scan, error);
-  else
-    fpi_device_identify_report (device, matching, new_scan, error);
+  fpi_device_identify_report (device, matching, new_scan, error);
 
   fpi_ssm_next_state (self->task_ssm);
-
 }
 
 static void
-fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
+fp_identify_finger_mode_cb (FpiDeviceGoodixMoc  *self,
+                            gxfp_cmd_response_t *resp,
+                            GError              *error)
+{
+  if (error)
+    {
+      fpi_ssm_mark_failed (self->task_ssm, error);
+      return;
+    }
+  /* if reach max timeout(5sec) finger not up, try again */
+  if (resp->finger_status.status == GX_ERROR_WAIT_FINGER_UP_TIMEOUT)
+    {
+      fpi_ssm_jump_to_state (self->task_ssm, GOODIX_IDENTIFY_WAIT_FINGER_UP);
+      return;
+    }
+  else if (resp->finger_status.status != GX_SUCCESS)
+    {
+      fpi_ssm_mark_failed (self->task_ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                     "Switch finger mode failed"));
+      return;
+    }
+  fpi_device_report_finger_status_changes (FP_DEVICE (self),
+                                           FP_FINGER_STATUS_NONE,
+                                           FP_FINGER_STATUS_PRESENT);
+  fpi_ssm_next_state (self->task_ssm);
+}
+
+static void
+fp_identify_sm_run_state (FpiSsm *ssm, FpDevice *device)
 {
   FpiDeviceGoodixMoc *self = FPI_DEVICE_GOODIXMOC (device);
   guint8 param[3] = { 0 };
@@ -477,7 +513,7 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
-    case FP_VERIFY_PWR_BTN_SHIELD_ON:
+    case GOODIX_IDENTIFY_PWR_BTN_SHIELD_ON:
       goodix_sensor_cmd (self, MOC_CMD0_PWR_BTN_SHIELD, MOC_CMD1_PWR_BTN_SHIELD_ON,
                          false,
                          NULL,
@@ -485,7 +521,7 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
                          fp_pwr_btn_shield_cb);
       break;
 
-    case FP_VERIFY_CAPTURE:
+    case GOODIX_IDENTIFY_CAPTURE:
       fpi_device_report_finger_status_changes (device,
                                                FP_FINGER_STATUS_NEEDED,
                                                FP_FINGER_STATUS_NONE);
@@ -493,18 +529,29 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
                          true,
                          (const guint8 *) &param,
                          G_N_ELEMENTS (param),
-                         fp_verify_capture_cb);
+                         fp_identify_capture_cb);
       break;
 
-    case FP_VERIFY_IDENTIFY:
+    case GOODIX_IDENTIFY_IDENTIFY:
       goodix_sensor_cmd (self, MOC_CMD0_IDENTIFY, MOC_CMD1_DEFAULT,
                          false,
                          (const guint8 *) nonce,
                          TEMPLATE_ID_SIZE,
-                         fp_verify_cb);
+                         fp_identify_cb);
       break;
 
-    case FP_VERIFY_PWR_BTN_SHIELD_OFF:
+    case GOODIX_IDENTIFY_WAIT_FINGER_UP:
+      {
+        guint8 dummy = 0;
+        goodix_sensor_cmd (self, MOC_CMD0_FINGER_MODE, MOC_CMD1_SET_FINGER_UP,
+                           true,
+                           &dummy,
+                           1,
+                           fp_identify_finger_mode_cb);
+      }
+      break;
+
+    case GOODIX_IDENTIFY_PWR_BTN_SHIELD_OFF:
       goodix_sensor_cmd (self, MOC_CMD0_PWR_BTN_SHIELD, MOC_CMD1_PWR_BTN_SHIELD_OFF,
                          false,
                          NULL,
@@ -516,25 +563,16 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
 }
 
 static void
-fp_verify_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+fp_identify_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceGoodixMoc *self = FPI_DEVICE_GOODIXMOC (dev);
 
   fp_info ("Verify complete!");
 
   if (error && error->domain == FP_DEVICE_RETRY)
-    {
-      if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
-        fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL, g_steal_pointer (&error));
-      else
-        fpi_device_identify_report (dev, NULL, NULL, g_steal_pointer (&error));
-    }
+    fpi_device_identify_report (dev, NULL, NULL, g_steal_pointer (&error));
 
-  if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
-    fpi_device_verify_complete (dev, error);
-
-  else
-    fpi_device_identify_complete (dev, error);
+  fpi_device_identify_complete (dev, error);
 
   self->task_ssm = NULL;
 }
@@ -666,7 +704,7 @@ fp_enroll_capture_cb (FpiDeviceGoodixMoc  *self,
                                   self->enroll_stage,
                                   NULL,
                                   fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
-      fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_CAPTURE);
+      fpi_ssm_jump_to_state (self->task_ssm, GOODIX_ENROLL_CAPTURE);
       return;
     }
   fpi_device_report_finger_status_changes (FP_DEVICE (self),
@@ -684,7 +722,7 @@ fp_enroll_capture_cb (FpiDeviceGoodixMoc  *self,
                                   self->enroll_stage,
                                   NULL,
                                   fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
-      fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_CAPTURE);
+      fpi_ssm_jump_to_state (self->task_ssm, GOODIX_ENROLL_CAPTURE);
       return;
     }
   else
@@ -715,7 +753,7 @@ fp_enroll_update_cb (FpiDeviceGoodixMoc  *self,
                                   NULL,
                                   fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
     }
-  else if (resp->enroll_update.rollback)
+  else if (resp->enroll_update.rollback || resp->result == 0x73)
     {
       fpi_device_enroll_progress (FP_DEVICE (self),
                                   self->enroll_stage,
@@ -730,7 +768,7 @@ fp_enroll_update_cb (FpiDeviceGoodixMoc  *self,
   /* if enroll complete, no need to wait finger up */
   if (self->enroll_stage >= self->max_enroll_stage)
     {
-      fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_CHECK_DUPLICATE);
+      fpi_ssm_jump_to_state (self->task_ssm, GOODIX_ENROLL_CHECK_DUPLICATE);
       return;
     }
 
@@ -796,7 +834,7 @@ fp_finger_mode_cb (FpiDeviceGoodixMoc  *self,
   /* if reach max timeout(5sec) finger not up, switch to finger up again */
   if (resp->finger_status.status == GX_ERROR_WAIT_FINGER_UP_TIMEOUT)
     {
-      fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_WAIT_FINGER_UP);
+      fpi_ssm_jump_to_state (self->task_ssm, GOODIX_ENROLL_WAIT_FINGER_UP);
       return;
     }
   else if (resp->finger_status.status != GX_SUCCESS)
@@ -811,7 +849,7 @@ fp_finger_mode_cb (FpiDeviceGoodixMoc  *self,
                                            FP_FINGER_STATUS_PRESENT);
   if (self->enroll_stage < self->max_enroll_stage)
     {
-      fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_CAPTURE);
+      fpi_ssm_jump_to_state (self->task_ssm, GOODIX_ENROLL_CAPTURE);
       return;
     }
   fpi_ssm_next_state (self->task_ssm);
@@ -837,7 +875,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
-    case FP_ENROLL_PWR_BTN_SHIELD_ON:
+    case GOODIX_ENROLL_PWR_BTN_SHIELD_ON:
       {
         goodix_sensor_cmd (self, MOC_CMD0_PWR_BTN_SHIELD, MOC_CMD1_PWR_BTN_SHIELD_ON,
                            false,
@@ -847,7 +885,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
       }
       break;
 
-    case FP_ENROLL_ENUM:
+    case GOODIX_ENROLL_ENUM:
       {
         goodix_sensor_cmd (self, MOC_CMD0_GETFINGERLIST, MOC_CMD1_DEFAULT,
                            false,
@@ -857,7 +895,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
       }
       break;
 
-    case FP_ENROLL_CREATE:
+    case GOODIX_ENROLL_CREATE:
       {
         goodix_sensor_cmd (self, MOC_CMD0_ENROLL_INIT, MOC_CMD1_DEFAULT,
                            false,
@@ -867,7 +905,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
       }
       break;
 
-    case FP_ENROLL_CAPTURE:
+    case GOODIX_ENROLL_CAPTURE:
       fpi_device_report_finger_status_changes (device,
                                                FP_FINGER_STATUS_NEEDED,
                                                FP_FINGER_STATUS_NONE);
@@ -878,7 +916,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
                          fp_enroll_capture_cb);
       break;
 
-    case FP_ENROLL_UPDATE:
+    case GOODIX_ENROLL_UPDATE:
       dummy[0] = 1;
       dummy[1] = self->sensorcfg->config[2];
       dummy[2] = self->sensorcfg->config[3];
@@ -889,7 +927,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
                          fp_enroll_update_cb);
       break;
 
-    case FP_ENROLL_WAIT_FINGER_UP:
+    case GOODIX_ENROLL_WAIT_FINGER_UP:
       dummy[0] = 0;
       goodix_sensor_cmd (self, MOC_CMD0_FINGER_MODE, MOC_CMD1_SET_FINGER_UP,
                          true,
@@ -898,7 +936,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
                          fp_finger_mode_cb);
       break;
 
-    case FP_ENROLL_CHECK_DUPLICATE:
+    case GOODIX_ENROLL_CHECK_DUPLICATE:
       goodix_sensor_cmd (self, MOC_CMD0_CHECK4DUPLICATE, MOC_CMD1_DEFAULT,
                          false,
                          (const guint8 *) &dummy,
@@ -906,7 +944,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
                          fp_enroll_check_duplicate_cb);
       break;
 
-    case FP_ENROLL_COMMIT:
+    case GOODIX_ENROLL_COMMIT:
       {
         fpi_device_get_enroll_data (device, &print);
         user_id = fpi_print_generate_user_id (print);
@@ -914,7 +952,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
         user_id_len = MIN (100, user_id_len);
         finger = 1;
 
-        if (g_strcmp0 (g_getenv ("FP_DEVICE_EMULATION"), "1") == 0)
+        if (fpi_device_emulation_mode_enabled (FP_DEVICE (self)))
           memset (self->template_id, 0, TEMPLATE_ID_SIZE);
         uid = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
                                          user_id,
@@ -959,7 +997,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
       }
       break;
 
-    case FP_ENROLL_PWR_BTN_SHIELD_OFF:
+    case GOODIX_ENROLL_PWR_BTN_SHIELD_OFF:
       {
         goodix_sensor_cmd (self, MOC_CMD0_PWR_BTN_SHIELD, MOC_CMD1_PWR_BTN_SHIELD_OFF,
                            false,
@@ -1050,7 +1088,7 @@ fp_init_cb_reset_or_complete (FpiDeviceGoodixMoc  *self,
     {
       fp_warn ("Template storage appears to have been corrupted! Error was: %s", error->message);
       fp_warn ("A known reason for this to happen is a firmware bug triggered by another storage area being initialized.");
-      fpi_ssm_jump_to_state (self->task_ssm, FP_INIT_RESET_DEVICE);
+      fpi_ssm_jump_to_state (self->task_ssm, GOODIX_INIT_RESET_DEVICE);
     }
   else
     {
@@ -1091,7 +1129,7 @@ fp_init_sm_run_state (FpiSsm *ssm, FpDevice *device)
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
-    case FP_INIT_VERSION:
+    case GOODIX_INIT_VERSION:
       goodix_sensor_cmd (self, MOC_CMD0_GET_VERSION, MOC_CMD1_DEFAULT,
                          false,
                          &dummy,
@@ -1099,7 +1137,7 @@ fp_init_sm_run_state (FpiSsm *ssm, FpDevice *device)
                          fp_init_version_cb);
       break;
 
-    case FP_INIT_CONFIG:
+    case GOODIX_INIT_CONFIG:
       goodix_sensor_cmd (self, MOC_CMD0_UPDATE_CONFIG, MOC_CMD1_WRITE_CFG_TO_FLASH,
                          false,
                          (guint8 *) self->sensorcfg,
@@ -1107,7 +1145,7 @@ fp_init_sm_run_state (FpiSsm *ssm, FpDevice *device)
                          fp_init_config_cb);
       break;
 
-    case FP_INIT_TEMPLATE_LIST:
+    case GOODIX_INIT_TEMPLATE_LIST:
       /* List prints to check whether the template DB was corrupted.
        * As of 2022-06-13 there is a known firmware issue that can cause the
        * stored templates for Linux to be corrupted when the Windows storage
@@ -1122,7 +1160,7 @@ fp_init_sm_run_state (FpiSsm *ssm, FpDevice *device)
                          fp_init_cb_reset_or_complete);
       break;
 
-    case FP_INIT_RESET_DEVICE:
+    case GOODIX_INIT_RESET_DEVICE:
       fp_warn ("Resetting device storage, you will need to enroll all prints again!");
       goodix_sensor_cmd (self, MOC_CMD0_DELETETEMPLATE, MOC_CMD1_DELETE_ALL,
                          FALSE,
@@ -1334,7 +1372,7 @@ gx_fp_probe (FpDevice *device)
   if (!g_usb_device_claim_interface (usb_dev, 0, 0, &error))
     goto err_close;
 
-  if (g_strcmp0 (g_getenv ("FP_DEVICE_EMULATION"), "1") == 0)
+  if (fpi_device_emulation_mode_enabled (FP_DEVICE (self)))
     {
 
       serial = g_strdup ("emulated-device");
@@ -1361,22 +1399,30 @@ gx_fp_probe (FpDevice *device)
     case 0x60A2:
     case 0x60A4:
     case 0x6014:
+    case 0x6090:
     case 0x6092:
     case 0x6094:
+    case 0x609A:
     case 0x609C:
     case 0x60BC:
+    case 0x60C2:
     case 0x6304:
     case 0x631C:
     case 0x633C:
     case 0x634C:
+    case 0x6382:
     case 0x6384:
     case 0x639C:
     case 0x63AC:
     case 0x63BC:
     case 0x63CC:
+    case 0x650A:
+    case 0x650C:
     case 0x6582:
     case 0x6A94:
     case 0x659A:
+    case 0x6890:
+    case 0x6984:
       self->max_enroll_stage = 12;
       break;
 
@@ -1432,7 +1478,7 @@ gx_fp_init (FpDevice *device)
     }
 
   self->task_ssm = fpi_ssm_new (device, fp_init_sm_run_state,
-                                FP_INIT_NUM_STATES);
+                                GOODIX_INIT_NUM_STATES);
 
   fpi_ssm_start (self->task_ssm, fp_init_ssm_done);
 
@@ -1463,9 +1509,7 @@ gx_fp_exit_cb (FpiDeviceGoodixMoc  *self,
                gxfp_cmd_response_t *resp,
                GError              *error)
 {
-
-
-  if (resp->result >= GX_FAILED)
+  if (resp && resp->result >= GX_FAILED)
     fp_dbg ("Setting power button shield failed, result: 0x%x", resp->result);
   self->is_power_button_shield_on = false;
   gx_fp_release_interface (self, error);
@@ -1495,16 +1539,16 @@ gx_fp_exit (FpDevice *device)
 
 
 static void
-gx_fp_verify_identify (FpDevice *device)
+gx_fp_identify (FpDevice *device)
 {
   FpiDeviceGoodixMoc *self = FPI_DEVICE_GOODIXMOC (device);
 
-  self->task_ssm = fpi_ssm_new_full (device, fp_verify_sm_run_state,
-                                     FP_VERIFY_NUM_STATES,
-                                     FP_VERIFY_PWR_BTN_SHIELD_OFF,
-                                     "verify");
+  self->task_ssm = fpi_ssm_new_full (device, fp_identify_sm_run_state,
+                                     GOODIX_IDENTIFY_NUM_STATES,
+                                     GOODIX_IDENTIFY_PWR_BTN_SHIELD_OFF,
+                                     "identify");
 
-  fpi_ssm_start (self->task_ssm, fp_verify_ssm_done);
+  fpi_ssm_start (self->task_ssm, fp_identify_ssm_done);
 
 }
 
@@ -1517,8 +1561,8 @@ gx_fp_enroll (FpDevice *device)
   self->enroll_stage = 0;
 
   self->task_ssm = fpi_ssm_new_full (device, fp_enroll_sm_run_state,
-                                     FP_ENROLL_NUM_STATES,
-                                     FP_ENROLL_PWR_BTN_SHIELD_OFF,
+                                     GOODIX_ENROLL_NUM_STATES,
+                                     GOODIX_ENROLL_PWR_BTN_SHIELD_OFF,
                                      "enroll");
 
   fpi_ssm_start (self->task_ssm, fp_enroll_ssm_done);
@@ -1557,7 +1601,7 @@ gx_fp_template_delete (FpDevice *device)
   gsize user_id_len = 0;
   const guint8 *tid;
   gsize tid_len = 0;
-  gsize payload_len = 0;
+  guint16 payload_len = 0;
   g_autofree guint8 *payload = NULL;
 
   fpi_device_get_delete_data (device, &print);
@@ -1570,7 +1614,8 @@ gx_fp_template_delete (FpDevice *device)
                                   fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
       return;
     }
-  if (!encode_finger_id (tid, tid_len, user_id, user_id_len, &payload, (guint16 *) &payload_len))
+
+  if (!encode_finger_id (tid, tid_len, user_id, user_id_len, &payload, &payload_len))
     {
       fpi_device_delete_complete (device,
                                   fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -1608,22 +1653,28 @@ fpi_device_goodixmoc_init (FpiDeviceGoodixMoc *self)
 static const FpIdEntry id_table[] = {
   { .vid = 0x27c6,  .pid = 0x5840,  },
   { .vid = 0x27c6,  .pid = 0x6014,  },
+  { .vid = 0x27c6,  .pid = 0x6090,  },
   { .vid = 0x27c6,  .pid = 0x6092,  },
   { .vid = 0x27c6,  .pid = 0x6094,  },
+  { .vid = 0x27c6,  .pid = 0x609A,  },
   { .vid = 0x27c6,  .pid = 0x609C,  },
   { .vid = 0x27c6,  .pid = 0x60A2,  },
   { .vid = 0x27c6,  .pid = 0x60A4,  },
   { .vid = 0x27c6,  .pid = 0x60BC,  },
+  { .vid = 0x27c6,  .pid = 0x60C2,  },
   { .vid = 0x27c6,  .pid = 0x6304,  },
   { .vid = 0x27c6,  .pid = 0x631C,  },
   { .vid = 0x27c6,  .pid = 0x633C,  },
   { .vid = 0x27c6,  .pid = 0x634C,  },
+  { .vid = 0x27c6,  .pid = 0x6382,  },
   { .vid = 0x27c6,  .pid = 0x6384,  },
   { .vid = 0x27c6,  .pid = 0x639C,  },
   { .vid = 0x27c6,  .pid = 0x63AC,  },
   { .vid = 0x27c6,  .pid = 0x63BC,  },
   { .vid = 0x27c6,  .pid = 0x63CC,  },
   { .vid = 0x27c6,  .pid = 0x6496,  },
+  { .vid = 0x27c6,  .pid = 0x650A,  },
+  { .vid = 0x27c6,  .pid = 0x650C,  },
   { .vid = 0x27c6,  .pid = 0x6582,  },
   { .vid = 0x27c6,  .pid = 0x6584,  },
   { .vid = 0x27c6,  .pid = 0x658C,  },
@@ -1632,6 +1683,11 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x27c6,  .pid = 0x659A,  },
   { .vid = 0x27c6,  .pid = 0x659C,  },
   { .vid = 0x27c6,  .pid = 0x6A94,  },
+  { .vid = 0x27c6,  .pid = 0x6512,  },
+  { .vid = 0x27c6,  .pid = 0x6890,  },
+  { .vid = 0x27c6,  .pid = 0x689A,  },
+  { .vid = 0x27c6,  .pid = 0x66A9,  },
+  { .vid = 0x27c6,  .pid = 0x6984,  },
   { .vid = 0,  .pid = 0,  .driver_data = 0 },   /* terminating entry */
 };
 
@@ -1656,8 +1712,7 @@ fpi_device_goodixmoc_class_init (FpiDeviceGoodixMocClass *klass)
   dev_class->delete = gx_fp_template_delete;
   dev_class->clear_storage = gx_fp_template_delete_all;
   dev_class->list   = gx_fp_template_list;
-  dev_class->verify   = gx_fp_verify_identify;
-  dev_class->identify = gx_fp_verify_identify;
+  dev_class->identify = gx_fp_identify;
 
   fpi_device_class_auto_initialize_features (dev_class);
   dev_class->features |= FP_DEVICE_FEATURE_DUPLICATES_CHECK;

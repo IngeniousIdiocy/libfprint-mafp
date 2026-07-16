@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 import traceback
 import sys
@@ -27,9 +27,13 @@ assert not d.has_feature(FPrint.DeviceFeature.DUPLICATES_CHECK)
 assert d.has_feature(FPrint.DeviceFeature.STORAGE)
 assert d.has_feature(FPrint.DeviceFeature.STORAGE_LIST)
 assert d.has_feature(FPrint.DeviceFeature.STORAGE_DELETE)
-assert not d.has_feature(FPrint.DeviceFeature.STORAGE_CLEAR)
+assert d.has_feature(FPrint.DeviceFeature.STORAGE_CLEAR)
 
 d.open_sync()
+
+print("Clear")
+d.clear_storage_sync()
+print("Clear done")
 
 template = FPrint.Print.new(d)
 

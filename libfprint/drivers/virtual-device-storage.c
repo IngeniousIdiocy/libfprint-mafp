@@ -77,6 +77,7 @@ dev_identify (FpDevice *dev)
                                                  &idx))
         {
           match = g_ptr_array_index (prints, idx);
+          fp_print_set_finger (new_scan, fp_print_get_finger (match));
         }
 
       if (!self->match_reported)

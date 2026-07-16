@@ -75,7 +75,8 @@ fpi_byte_writer_new_with_size (guint size, gboolean fixed)
   FpiByteWriter *ret = fpi_byte_writer_new ();
 
   ret->alloc_size = size;
-  ret->parent.data = g_malloc (ret->alloc_size);
+  ret->parent.data = g_malloc0 (ret->alloc_size);
+  ret->parent.size = size;
   ret->fixed = fixed;
   ret->owned = TRUE;
 
@@ -142,7 +143,8 @@ fpi_byte_writer_init_with_size (FpiByteWriter * writer, guint size,
 
   fpi_byte_writer_init (writer);
 
-  writer->parent.data = g_malloc (size);
+  writer->parent.data = g_malloc0 (size);
+  writer->parent.size = size;
   writer->alloc_size = size;
   writer->fixed = fixed;
   writer->owned = TRUE;
@@ -209,13 +211,42 @@ fpi_byte_writer_reset_and_get_data (FpiByteWriter * writer)
 
   g_return_val_if_fail (writer != NULL, NULL);
 
-  data = (guint8 *) writer->parent.data;
+  data = (guint8 *) g_steal_pointer (&writer->parent.data);
   if (!writer->owned)
     data = g_memdup2 (data, writer->parent.size);
-  writer->parent.data = NULL;
   fpi_byte_writer_reset (writer);
 
   return data;
+}
+
+/**
+ * fpi_byte_writer_reset_and_get_bytes:
+ * @writer: #FpiByteWriter instance
+ *
+ * Resets @writer and returns the current data as a #GBytes.
+ *
+ * Returns: (transfer full): the current data as a #GBytes.
+ */
+GBytes *
+fpi_byte_writer_reset_and_get_bytes (FpiByteWriter * writer)
+{
+  GBytes *bytes;
+
+  g_return_val_if_fail (writer != NULL, NULL);
+
+  if (!writer->owned)
+    {
+      bytes = g_bytes_new (g_steal_pointer (&writer->parent.data),
+                           writer->parent.size);
+    }
+  else
+    {
+      bytes = g_bytes_new_take ((gpointer) g_steal_pointer (&writer->parent.data),
+                                writer->parent.size);
+    }
+
+  fpi_byte_writer_reset (writer);
+  return g_steal_pointer (&bytes);
 }
 
 /**
@@ -598,6 +629,15 @@ CREATE_WRITE_STRING_FUNC (32, guint32);
  * @size: Size of @data in bytes
  *
  * Writes @size bytes of @data to @writer.
+ *
+ * Returns: %TRUE if the value could be written
+ */
+/**
+ * fpi_byte_writer_put_bytes:
+ * @writer: #FpiByteWriter instance
+ * @bytes: (transfer none): Data to write
+ *
+ * Writes the contents of @bytes to @writer.
  *
  * Returns: %TRUE if the value could be written
  */

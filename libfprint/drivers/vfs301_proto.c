@@ -63,7 +63,7 @@ usb_print_packet (int dir, GError *error, const guint8 *data, int length)
 }
 #endif
 
-static void
+static gboolean
 usb_recv (FpDeviceVfs301 *dev, guint8 endpoint, int max_bytes, FpiUsbTransfer **out, GError **error)
 {
   GError *err = NULL;
@@ -87,10 +87,14 @@ usb_recv (FpDeviceVfs301 *dev, guint8 endpoint, int max_bytes, FpiUsbTransfer **
       if (!error)
         g_warning ("Unhandled receive error: %s", err->message);
       g_propagate_error (error, err);
+
+      return FALSE;
     }
 
   if (out)
     *out = g_steal_pointer (&transfer);
+
+  return TRUE;
 }
 
 FP_GNUC_ACCESS (read_only, 2, 3)
@@ -157,7 +161,7 @@ vfs301_proto_generate_0B (int subtype, gssize *len)
 }
 
 #define HEX_TO_INT(c) \
-        (((c) >= '0' && (c) <= '9') ? ((c) - '0') : ((c) - 'A' + 10))
+  (((c) >= '0' && (c) <= '9') ? ((c) - '0') : ((c) - 'A' + 10))
 
 static guint8 *
 translate_str (const char **srcL, gssize *len)
@@ -344,7 +348,11 @@ vfs301_extract_image (FpDeviceVfs301 *vfs, guint8 *output, int *output_height
   int last_line;
   int i;
 
-  g_assert (vfs->scanline_count >= 1);
+  if (vfs->scanline_count < 1 || scanlines == NULL)
+    {
+      *output_height = 0;
+      g_return_if_reached ();
+    }
 
   *output_height = 1;
   memcpy (output, scanlines, VFS301_FP_OUTPUT_WIDTH);
@@ -422,15 +430,15 @@ img_process_data (int first_block, FpDeviceVfs301 *dev, const guint8 *buf, int l
 /************************** PROTOCOL STUFF ************************************/
 
 #define USB_RECV(from, len) \
-        usb_recv (dev, from, len, NULL, NULL)
+  usb_recv (dev, from, len, NULL, NULL)
 
 #define USB_SEND(type, subtype) \
-        { \
-          const guint8 *data; \
-          gssize len; \
-          data = vfs301_proto_generate (type, subtype, &len); \
-          usb_send (dev, data, len, NULL); \
-        }
+  { \
+    const guint8 *data; \
+    gssize len; \
+    data = vfs301_proto_generate (type, subtype, &len); \
+    usb_send (dev, data, len, NULL); \
+  }
 
 #define RAW_DATA(x) g_memdup2 (x, sizeof (x)), sizeof (x)
 
@@ -443,7 +451,8 @@ vfs301_proto_process_data (FpDeviceVfs301 *dev, int first_block, const guint8 *b
 
   if (first_block)
     {
-      g_assert (len >= VFS301_FP_FRAME_SIZE);
+      if (len < VFS301_FP_FRAME_SIZE)
+        g_return_val_if_reached (img_process_data (first_block, dev, buf, 0));
 
       /* Skip bytes until start_sequence is found */
       for (i = 0; i < VFS301_FP_FRAME_SIZE; i++, buf++, len--)
@@ -462,26 +471,25 @@ vfs301_proto_request_fingerprint (FpDeviceVfs301 *dev)
 }
 
 int
-vfs301_proto_peek_event (FpDeviceVfs301 *dev)
+vfs301_proto_peek_event (FpDeviceVfs301 *dev,
+                         GError        **error)
 {
-  g_autoptr(GError) error = NULL;
   g_autoptr(FpiUsbTransfer) transfer = NULL;
 
   const char no_event[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
   const char got_event[] = {0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00};
 
   USB_SEND (0x17, -1);
-  usb_recv (dev, VFS301_RECEIVE_ENDPOINT_CTRL, 7, &transfer, &error);
-
-  /* XXX: This is obviously not a sane error handling! */
-  g_assert (!error);
+  if (!usb_recv (dev, VFS301_RECEIVE_ENDPOINT_CTRL, 7, &transfer, error))
+    return -1;
 
   if (memcmp (transfer->buffer, no_event, sizeof (no_event)) == 0)
     return 0;
   else if (memcmp (transfer->buffer, got_event, sizeof (no_event)) == 0)
     return 1;
-  else
-    g_assert_not_reached ();
+
+  g_set_error (error, FP_DEVICE_ERROR_PROTO, 0, "Unexpected event response");
+  return -1;
 }
 
 /* XXX: We sometimes need to receive data on from two endpoints at the same
@@ -489,13 +497,13 @@ vfs301_proto_peek_event (FpDeviceVfs301 *dev)
  *      we will run into timeouts randomly and need to then try again.
  */
 #define PARALLEL_RECEIVE(e1, l1, e2, l2) \
-        { \
-          g_autoptr(GError) error = NULL; \
-          usb_recv (dev, e1, l1, NULL, &error); \
-          usb_recv (dev, e2, l2, NULL, NULL); \
-          if (g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_TIMED_OUT)) \
-          usb_recv (dev, e1, l1, NULL, NULL); \
-        }
+  { \
+    g_autoptr(GError) error = NULL; \
+    usb_recv (dev, e1, l1, NULL, &error); \
+    usb_recv (dev, e2, l2, NULL, NULL); \
+    if (g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_TIMED_OUT)) \
+    usb_recv (dev, e1, l1, NULL, NULL); \
+  }
 
 static void
 vfs301_proto_process_event_cb (FpiUsbTransfer *transfer,

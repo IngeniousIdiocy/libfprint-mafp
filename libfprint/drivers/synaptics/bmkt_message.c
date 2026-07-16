@@ -177,17 +177,25 @@ parse_get_enrolled_fingers_report (bmkt_msg_resp_t *msg_resp, bmkt_response_t *r
 
   if (msg_resp->payload_len < 2)
     return BMKT_UNRECOGNIZED_MESSAGE;
+
   /* 2 bytes per finger so calculate the total number of fingers to process*/
   int num_fingers = (msg_resp->payload_len) / 2;
 
   bmkt_enrolled_fingers_resp_t *get_enrolled_fingers_resp = &resp->response.enrolled_fingers_resp;
 
+  if (num_fingers > (int) G_N_ELEMENTS (get_enrolled_fingers_resp->fingers))
+    {
+      g_warning ("Device reported more enrolled fingers (%d) than supported",
+                 num_fingers);
+      num_fingers = G_N_ELEMENTS (get_enrolled_fingers_resp->fingers);
+    }
+
   for (i = 0; i < num_fingers; i++)
     {
       get_enrolled_fingers_resp->fingers[i].finger_id = extract8 (msg_resp->payload, &offset);
       get_enrolled_fingers_resp->fingers[i].template_status = extract8 (msg_resp->payload, &offset);
-
     }
+
   return BMKT_SUCCESS;
 }
 static int
@@ -214,10 +222,18 @@ parse_get_enrolled_users_report (bmkt_msg_resp_t *msg_resp, bmkt_response_t *res
       get_enroll_templates_resp->templates[n].user_id_len = extract8 (msg_resp->payload, &offset) - 2;
       if(get_enroll_templates_resp->templates[n].user_id_len > BMKT_MAX_USER_ID_LEN)
         return BMKT_UNRECOGNIZED_MESSAGE;
+      if (offset >= msg_resp->payload_len)
+        return BMKT_CORRUPT_MESSAGE;
       get_enroll_templates_resp->templates[n].template_status = extract8 (msg_resp->payload, &offset);
+      if (offset >= msg_resp->payload_len)
+        return BMKT_CORRUPT_MESSAGE;
       get_enroll_templates_resp->templates[n].finger_id = extract8 (msg_resp->payload, &offset);
       for (i = 0; i < get_enroll_templates_resp->templates[n].user_id_len; i++)
-        get_enroll_templates_resp->templates[n].user_id[i] = extract8 (msg_resp->payload, &offset);
+        {
+          if (offset >= msg_resp->payload_len)
+            return BMKT_CORRUPT_MESSAGE;
+          get_enroll_templates_resp->templates[n].user_id[i] = extract8 (msg_resp->payload, &offset);
+        }
       get_enroll_templates_resp->templates[n].user_id[i] = '\0';
     }
 
@@ -256,7 +272,8 @@ bmkt_compose_message (uint8_t *cmd, int *cmd_len, uint8_t msg_id, uint8_t seq_nu
   cmd[BMKT_MESSAGE_SEQ_NUM_FIELD] = seq_num;
   cmd[BMKT_MESSAGE_ID_FIELD] = msg_id;
   cmd[BMKT_MESSAGE_PAYLOAD_LEN_FIELD] = payload_size;
-  memcpy (&cmd[BMKT_MESSAGE_PAYLOAD_FIELD], payload, payload_size);
+  if (payload_size > 0)
+    memcpy (&cmd[BMKT_MESSAGE_PAYLOAD_FIELD], payload, payload_size);
 
   *cmd_len = message_len;
 
@@ -266,12 +283,19 @@ bmkt_compose_message (uint8_t *cmd, int *cmd_len, uint8_t msg_id, uint8_t seq_nu
 int
 bmkt_parse_message_header (uint8_t *resp_buf, int resp_len, bmkt_msg_resp_t *msg_resp)
 {
+  if (resp_len < BMKT_MESSAGE_HEADER_LEN)
+    return BMKT_CORRUPT_MESSAGE;
+
   if (resp_buf[BMKT_MESSAGE_HEADER_ID_FIELD] != BMKT_MESSAGE_HEADER_ID)
     return BMKT_CORRUPT_MESSAGE;
 
   msg_resp->seq_num = resp_buf[BMKT_MESSAGE_SEQ_NUM_FIELD];
   msg_resp->msg_id = resp_buf[BMKT_MESSAGE_ID_FIELD];
   msg_resp->payload_len = resp_buf[BMKT_MESSAGE_PAYLOAD_LEN_FIELD];
+
+  if (msg_resp->payload_len > resp_len - BMKT_MESSAGE_PAYLOAD_FIELD)
+    return BMKT_CORRUPT_MESSAGE;
+
   if (msg_resp->payload_len > 0)
     msg_resp->payload = &resp_buf[BMKT_MESSAGE_PAYLOAD_FIELD];
   else

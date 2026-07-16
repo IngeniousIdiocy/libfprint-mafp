@@ -146,7 +146,7 @@ elan_save_frame (FpiDeviceElan *self, unsigned short *frame)
           raw_idx = frame_margin + y + x * raw_height;
         frame_idx = x + y * frame_width;
         frame[frame_idx] =
-          ((unsigned short *) self->last_read)[raw_idx];
+          GUINT16_FROM_LE (((unsigned short *) self->last_read)[raw_idx]);
       }
 }
 
@@ -251,7 +251,12 @@ elan_process_frame_linear (unsigned short *raw_frame,
         max = raw_frame[i];
     }
 
-  g_assert (max != min);
+  if (max == min)
+    {
+      memset (frame->data, 0, frame_size);
+      *frames = g_slist_prepend (*frames, frame);
+      g_return_if_reached ();
+    }
 
   unsigned short px;
 
@@ -286,6 +291,11 @@ elan_process_frame_thirds (unsigned short *raw_frame,
   lvl2 = sorted[frame_size * 65 / 100];
   lvl3 = sorted[frame_size - 1];
   g_free (sorted);
+
+  /* Ensure levels are strictly monotonic to prevent division by zero */
+  lvl1 = MAX (lvl1, lvl0 + 1);
+  lvl2 = MAX (lvl2, lvl1 + 1);
+  lvl3 = MAX (lvl3, lvl2 + 1);
 
   unsigned short px;
 
@@ -547,10 +557,17 @@ capture_run_state (FpiSsm *ssm, FpDevice *dev)
           fpi_image_device_report_finger_status (idev, TRUE);
           elan_run_cmd (ssm, dev, &get_image_cmd, ELAN_CMD_TIMEOUT);
         }
+      else if (self->dev_type == ELAN_0C58 && self->last_read &&
+               (self->last_read[0] == 0x00 || self->last_read[0] == 0xaf))
+        {
+          /* 0x00 - not ready
+           * 0xaf - finger removed or sensor busy (seen on 0x0c58) */
+          fpi_ssm_jump_to_state_delayed (ssm, CAPTURE_WAIT_FINGER, 10);
+        }
       else
         {
           /* XXX: The timeout is emulated incorrectly, resulting in a zero byte read. */
-          if (g_strcmp0 (g_getenv ("FP_DEVICE_EMULATION"), "1") == 0)
+          if (fpi_device_emulation_mode_enabled (FP_DEVICE (self)))
             fpi_ssm_mark_completed (ssm);
           else
             fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
@@ -795,7 +812,7 @@ elan_calibrate (FpiDeviceElan *self)
 
   g_return_if_fail (!self->active);
   self->active = TRUE;
-  self->calib_atts_left = ELAN_CALIBRATION_ATTEMPTS;
+  self->calib_atts_left = ELAN_CALIBRATION_ATTEMPTS (self->dev_type);
 
   FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), calibrate_run_state,
                              CALIBRATE_NUM_STATES);

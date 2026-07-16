@@ -1,6 +1,51 @@
 This file lists notable changes in each release. For the full history of all
 changes, see ChangeLog.
 
+2026-02-10: v1.94.10 release
+
+Highlights:
+  * synaptics: Add USB reset in probe to recover stall condition
+  * synaptics: New PIDs 0x0169, 0x019F, 0x00E9, 0x01A0, 0x0109, 0x010A
+  * goodixmoc: New PID 0x66A9
+  * goodixmoc: Fix crash in exit callback handler
+  * fpcmoc: New PID 0xA306
+  * fpcmoc: Fix interrupt cancellable leak
+  * elanmoc: New PIDs 0x0CA7, 0x0CA8, 0x0CB0
+  * egismoc: New PIDs 0x0584, 0x0588
+  * focaltech_moc: New PIDs 0xA27A, 0x1579
+  * realtek: New PID 0xFA03
+  * fp-device: Clarify getter for open property
+  * libfprint: Use fatal-warnings on g-i-scanner
+
+2025-02-20: v1.94.9 release
+
+Highlights:
+  * uru4000: Use OpenSSL to perform AES-ECB encryption, as per this libfprint
+    does not support on NSS, but on openssl (>= 3.0).
+  * goodixmoc: New PIDs 0x60C2, 0x689A
+  * synaptics: New PIDs 0x016C, 0x0174, 0x0107, 0x0108, 0x00C2, 0x00F0
+  * fpcmoc: New PID 0xC844
+  * focaltech_moc: New PIDs 0xA99A, 0xA57A, 0xA78A
+  * elanmoc: New PIDs 0x0C98, 0x0C9D, 0x0CA3
+  * elanspi: New PIDs 0x3128, 0x2766
+  * fp-device: Add FP_DEVICE_RETRY_TOO_FAST retry error
+  * data: AppStream meta info listing supported USB devices.
+  * fixed various memory issues in multiple devices
+
+2024-09-03: v1.94.8 release
+
+Highlights:
+ * build: Support building in non-linux unix environments (tested in FreeBSD)
+ * egismoc: New PIDs 0x0583, 0x0586, 0x0587.
+ * elanmoc: New PID 0x0C9F.
+ * fpcmoc: New PIDs 0x9524, 0x9544.
+ * goodixmoc: New PIDs 0x609A, 0x650A, 0x650C, 0x6512.
+ * realtek: New PID 0x5816.
+ * synaptics: New PIDs 0x00C4, 0x019D, 0x00C6.
+ * fpcmoc: fix incorrect immobile handling during enrollment.
+ * fpcmoc: fixed jumping to wrong state at end of custom enroll.
+ * egismoc: various code cleanups.
+
 2024-02-20: v1.94.7 release
 
 Highlights:
